@@ -37,6 +37,7 @@ from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
+from hermes_cli import kanban_db
 
 logger = logging.getLogger(__name__)
 
@@ -789,6 +790,12 @@ def _handle_complete(args: dict, **kw) -> str:
             conn.close()
     except ValueError as e:
         return tool_error(f"kanban_complete: {e}")
+    except kanban_db.CompletionGateRequiredError as gate_err:
+        return tool_error(
+            f"Task {gate_err.task_id} requires completion gate "
+            f"{gate_err.gate_name}. Use engineering_complete after all required "
+            "verification passes."
+        )
     except Exception as e:
         logger.exception("kanban_complete failed")
         return tool_error(f"kanban_complete: {e}")

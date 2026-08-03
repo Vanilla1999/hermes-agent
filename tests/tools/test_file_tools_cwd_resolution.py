@@ -17,6 +17,7 @@ Core invariant these tests pin:
 
 import os
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -139,6 +140,45 @@ class _DummyDockerEnvironment:
     cwd_owner = "default"
 
 
+def test_absolute_host_workspace_path_maps_into_docker_workspace(_isolated_cwd, monkeypatch):
+    workspace, _decoy = _isolated_cwd
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.setattr(ft, "_terminal_env_type_for_task", lambda task_id="default": "docker")
+
+    resolved = ft._resolve_path_for_task(str(workspace / "target.py"))
+
+    assert resolved == Path("/workspace/target.py")
+
+
+def test_read_file_passes_mapped_absolute_path_to_docker_operations(_isolated_cwd, monkeypatch):
+    workspace, _decoy = _isolated_cwd
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.setattr(ft, "_terminal_env_type_for_task", lambda task_id="default": "docker")
+    captured = {}
+
+    class FakeOps:
+        def read_file(self, path, offset, limit):
+            captured["path"] = path
+            return SimpleNamespace(
+                content="1: ok", total_lines=1, file_size=2, truncated=False,
+                to_dict=lambda: {
+                    "content": "1: ok", "total_lines": 1, "file_size": 2,
+                    "truncated": False, "error": None,
+                },
+            )
+
+    monkeypatch.setattr(ft, "_get_file_ops", lambda task_id="default": FakeOps())
+
+    result = ft.read_file_tool(str(workspace / "target.py"), task_id="worker")
+
+    assert captured["path"] == "/workspace/target.py"
+    assert '"error": null' in result
+
+
 def test_resolution_base_always_absolute_no_terminal_cwd(_isolated_cwd, monkeypatch):
     """With TERMINAL_CWD unset, the base falls back to an ABSOLUTE process cwd."""
     workspace, decoy = _isolated_cwd
@@ -177,6 +217,111 @@ def test_warning_fires_when_relative_path_escapes_workspace(_isolated_cwd, monke
 # got neither a worktree anchor nor a warning, so a relative edit silently
 # landed in main. These tests pin the sentinel handling + empty-registry
 # anchoring + early warning.)
+
+
+@pytest.mark.parametrize("sentinel", ["", ".", "./", "auto", "cwd", "CWD", "Auto"])
+def test_sentinel_terminal_cwd_is_treated_as_unset(_isolated_cwd, monkeypatch, sentinel):
+    """Sentinel TERMINAL_CWD values are NOT used as a directory anchor.
+
+    They fall through to the (absolute) process cwd, exactly as if unset —
+    never resolved as a literal relative directory.
+    """
+    workspace, decoy = _isolated_cwd
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
+    monkeypatch.setenv("TERMINAL_CWD", sentinel)
+
+    assert ft._configured_terminal_cwd() is None
+    resolved = ft._resolve_path_for_task("target.py", task_id="default")
+    assert resolved.is_absolute()
+    assert resolved == (decoy / "target.py").resolve()
+
+
+def test_relative_nonsentinel_terminal_cwd_rejected(_isolated_cwd, monkeypatch):
+    """A relative (but non-sentinel) TERMINAL_CWD is still rejected as an anchor.
+
+    A relative anchor is ambiguous (relative to which cwd?), which is the exact
+    ambiguity that misroutes edits. It must fall through to the process cwd, not
+    be joined onto it as a literal subdir.
+    """
+    workspace, decoy = _isolated_cwd
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
+    monkeypatch.setenv("TERMINAL_CWD", "some/rel/path")
+
+    assert ft._configured_terminal_cwd() is None
+    resolved = ft._resolve_path_for_task("target.py", task_id="default")
+    assert resolved == (decoy / "target.py").resolve()
+
+
+def test_absolute_terminal_cwd_anchors_with_empty_registry(_isolated_cwd, monkeypatch):
+    """The incident-preventing case: worktree session, registry still empty.
+
+    With no live terminal cwd recorded yet but an absolute TERMINAL_CWD (the
+    worktree path cli.py/main.py set for `-w`), a relative edit must land in the
+    worktree — not the process cwd (main repo).
+    """
+    workspace, decoy = _isolated_cwd
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
+    monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+
+    resolved = ft._resolve_path_for_task("target.py", task_id="default")
+
+    assert resolved == (workspace / "target.py")
+    assert not str(resolved).startswith(str(decoy))
+
+
+def test_docker_cwd_mount_resolves_file_tools_inside_workspace(_isolated_cwd, monkeypatch):
+    workspace, _decoy = _isolated_cwd
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+    monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+
+    assert ft._configured_terminal_cwd() == "/workspace"
+    assert ft._resolve_path_for_task("README.md") == Path("/workspace/README.md")
+
+
+def test_docker_cwd_mount_remaps_registered_and_live_host_paths(_isolated_cwd, monkeypatch):
+    workspace, _decoy = _isolated_cwd
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(workspace))
+    monkeypatch.setattr(
+        ft, "_registered_task_cwd_override",
+        lambda task_id="default": ft._container_workspace_cwd(str(workspace)),
+    )
+
+    assert ft._authoritative_workspace_root() == "/workspace"
+    assert ft._live_cwd_if_owned(type("Env", (), {"cwd": str(workspace), "cwd_owner": "default"})(), "default") == "/workspace"
+
+
+def test_docker_cwd_mount_preserves_live_workspace_subdirectory(_isolated_cwd, monkeypatch):
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
+    monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
+
+    assert ft._container_workspace_cwd("/workspace/src") == "/workspace/src"
+    assert ft._container_workspace_cwd("/tmp/build") == "/tmp/build"
+
+
+def test_registered_task_cwd_override_anchors_before_terminal_env_exists(_isolated_cwd, monkeypatch):
+    """TUI/Desktop sessions register cwd by raw session key before tools run.
+
+    CWD-only overrides collapse to the shared terminal environment key, but the
+    file resolver must still read the raw task/session override before falling
+    back to TERMINAL_CWD or the process cwd.
+    """
+    workspace, decoy = _isolated_cwd
+    task_id = "desktop-session-cwd"
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+
+    terminal_tool.register_task_env_overrides(task_id, {"cwd": str(workspace)})
+
+    resolved = ft._resolve_path_for_task("target.py", task_id=task_id)
+
+    assert terminal_tool._resolve_container_task_id(task_id) == "default"
+    assert resolved == (workspace / "target.py")
+    assert not str(resolved).startswith(str(decoy))
 
 
 def test_warning_fires_from_terminal_cwd_when_registry_empty(_isolated_cwd, monkeypatch):

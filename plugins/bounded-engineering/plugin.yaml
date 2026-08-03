@@ -1,0 +1,6 @@
+name: bounded-engineering
+version: 0.1.0
+description: "Fail-closed bounded engineering worker protocol."
+kind: backend
+provides_tools:
+  - engineering_status

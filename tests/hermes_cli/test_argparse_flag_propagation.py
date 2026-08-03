@@ -102,6 +102,16 @@ class TestChatVerboseArg:
         assert "verbose" not in captured
 
 
+def test_dispatcher_toolsets_before_chat_are_preserved():
+    from hermes_cli._parser import build_top_level_parser
+
+    parser, _subparsers, _chat_parser = build_top_level_parser()
+    value = "bounded-engineering,file,kanban,skills,terminal"
+    args = parser.parse_args(["--toolsets", value, "chat", "-q", "work task"])
+
+    assert args.toolsets == value
+
+
 class TestYoloEnvVar:
     """Verify --yolo sets HERMES_YOLO_MODE regardless of flag position.
 

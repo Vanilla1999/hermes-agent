@@ -377,6 +377,86 @@ def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
 # ---------------------------------------------------------------------------
 
 DEFAULT_BOARD = "default"
+
+
+class BoardAlreadyExistsError(FileExistsError):
+    """Exclusive board admission lost to an already-persisted board."""
+
+
+class BoardLockError(RuntimeError):
+    """Board admission lock could not be used safely."""
+
+
+class BoardLockTimeoutError(BoardLockError, TimeoutError):
+    """Timed out waiting for exclusive board admission."""
+
+
+_BOARD_LOCK_TIMEOUT_SECONDS = 10.0
+_BOARD_LOCK_POLL_SECONDS = 0.05
+
+
+@contextlib.contextmanager
+def board_creation_lock(board: str):
+    """Serialize native board creation, failing closed if locking is unavailable."""
+    slug = _normalize_board_slug(board)
+    if not slug:
+        raise ValueError("board slug is required")
+    digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()
+    lock_path = kanban_home() / "kanban" / "locks" / f"board-{digest}.lock"
+    handle = None
+    try:
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+        os.chmod(lock_path, 0o600)
+        # msvcrt.locking requires the requested byte range to exist.
+        if _IS_WINDOWS and lock_path.stat().st_size < 1:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+    except OSError as exc:
+        if handle is not None:
+            handle.close()
+        raise BoardLockError(f"board creation lock unavailable for {slug!r}: {exc}") from exc
+
+    acquired = False
+    try:
+        deadline = time.monotonic() + _BOARD_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                handle.seek(0)
+                if _IS_WINDOWS:
+                    import msvcrt
+                    locking = getattr(msvcrt, "locking")
+                    locking(handle.fileno(), getattr(msvcrt, "LK_NBLCK"), 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (BlockingIOError, OSError) as exc:
+                if time.monotonic() >= deadline:
+                    raise BoardLockTimeoutError(
+                        f"timed out acquiring board creation lock for {slug!r}"
+                    ) from exc
+                time.sleep(_BOARD_LOCK_POLL_SECONDS)
+        yield
+    finally:
+        try:
+            if acquired:
+                handle.seek(0)
+                if _IS_WINDOWS:
+                    import msvcrt
+                    locking = getattr(msvcrt, "locking")
+                    locking(handle.fileno(), getattr(msvcrt, "LK_UNLCK"), 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError as exc:
+            raise BoardLockError(f"failed to release board creation lock for {slug!r}: {exc}") from exc
+        finally:
+            handle.close()
+
+
 _CURRENT_BOARD_OVERRIDE: ContextVar[str | None] = ContextVar(
     "hermes_kanban_current_board_override",
     default=None,
@@ -781,28 +861,32 @@ def create_board(
     color: Optional[str] = None,
     default_workdir: Optional[str] = None,
     project_id: Optional[str] = None,
+    exclusive: bool = False,
 ) -> dict:
-    """Create a new board directory + DB + metadata. Idempotent.
+    """Create a board under the native per-board lock.
 
-    Returns the resulting metadata. Raises :class:`ValueError` for a
-    malformed slug; returns the existing metadata (not an error) if the
-    board already exists — matching ``mkdir -p`` semantics.
+    Public behavior remains idempotent.  ``exclusive=True`` is the CAS form:
+    it raises :class:`BoardAlreadyExistsError` rather than reusing a winner.
     """
     normed = _normalize_board_slug(slug)
     if not normed:
         raise ValueError("board slug is required")
-    meta = write_board_metadata(
-        normed,
-        name=name,
-        description=description,
-        icon=icon,
-        color=color,
-        default_workdir=default_workdir,
-        project_id=project_id,
-    )
-    # Touch the DB so list_boards() sees it immediately.
-    init_db(board=normed)
-    return meta
+    with board_creation_lock(normed):
+        if board_exists(normed):
+            if exclusive:
+                raise BoardAlreadyExistsError(normed)
+            return read_board_metadata(normed)
+        meta = write_board_metadata(
+            normed, name=name, description=description, icon=icon,
+            color=color, default_workdir=default_workdir, project_id=project_id,
+        )
+        init_db(board=normed)
+        return meta
+
+
+def create_board_exclusive(slug: str, **metadata: Any) -> dict:
+    """Atomically create a board, raising typed already-exists on collision."""
+    return create_board(slug, exclusive=True, **metadata)
 
 
 def list_boards(*, include_archived: bool = True) -> list[dict]:
@@ -993,6 +1077,7 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    completion_gate: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1086,6 +1171,11 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            completion_gate=(
+                row["completion_gate"]
+                if "completion_gate" in keys and row["completion_gate"]
+                else None
             ),
         )
 
@@ -1274,7 +1364,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    completion_gate      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2473,6 +2564,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences",
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
+    if "completion_gate" not in cols:
+        _add_column_if_missing(conn, "tasks", "completion_gate", "completion_gate TEXT")
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -2903,6 +2996,7 @@ def create_task(
     goal_max_turns: Optional[int] = None,
     initial_status: str = "running",
     session_id: Optional[str] = None,
+    completion_gate: Optional[str] = None,
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
@@ -2952,6 +3046,8 @@ def create_task(
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
     assignee = _canonical_assignee(assignee)
+    if completion_gate is not None:
+        completion_gate = str(completion_gate).strip() or None
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -3217,8 +3313,9 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id,
+                        completion_gate
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3244,6 +3341,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        completion_gate,
                     ),
                 )
                 for pid in parents:
@@ -4001,6 +4099,19 @@ def _end_run(
     if not row or not row["current_run_id"]:
         return None
     run_id = int(row["current_run_id"])
+    existing = conn.execute(
+        "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
+    ).fetchone()
+    merged_metadata: dict = {}
+    if existing and existing["metadata"]:
+        try:
+            parsed = json.loads(existing["metadata"])
+            if isinstance(parsed, dict):
+                merged_metadata.update(parsed)
+        except (TypeError, json.JSONDecodeError):
+            pass
+    if metadata:
+        merged_metadata.update(metadata)
     conn.execute(
         """
         UPDATE task_runs
@@ -4021,7 +4132,7 @@ def _end_run(
             outcome,
             summary,
             error,
-            json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            json.dumps(merged_metadata, ensure_ascii=False) if merged_metadata else None,
             now,
             run_id,
         ),
@@ -4833,6 +4944,18 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
+class CompletionGateRequiredError(RuntimeError):
+    """Raised when ordinary completion is attempted on a gated task."""
+
+    def __init__(self, task_id: str, gate_name: str):
+        self.task_id = task_id
+        self.gate_name = gate_name
+        super().__init__(
+            f"Task {task_id} requires completion gate {gate_name}. "
+            "Use the trusted gated completion path."
+        )
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4842,6 +4965,7 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    _trusted_gate_name: Optional[str] = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -4904,6 +5028,14 @@ def complete_task(
         conn, task_id, metadata, summary=summary, result=result,
     )
     with write_txn(conn):
+        gate_row = conn.execute(
+            "SELECT completion_gate FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        configured_gate = gate_row["completion_gate"] if gate_row else None
+        if _trusted_gate_name is not None and configured_gate != _trusted_gate_name:
+            return False
+        if configured_gate and configured_gate != _trusted_gate_name:
+            raise CompletionGateRequiredError(task_id, configured_gate)
         if expected_run_id is None:
             cur = conn.execute(
                 """
@@ -4989,6 +5121,13 @@ def complete_task(
         # ``metadata["artifacts"]`` — we promote it onto the event so
         # consumers don't have to fetch the run row to find it.
         if isinstance(metadata, dict):
+            for key in (
+                "completion_gate",
+                "completion_evidence_sha256",
+                "completion_gate_version",
+            ):
+                if key in metadata:
+                    completed_payload[key] = metadata[key]
             md_artifacts = metadata.get("artifacts")
             if isinstance(md_artifacts, (list, tuple)):
                 cleaned_artifacts = [
@@ -5041,6 +5180,45 @@ def complete_task(
         summary=(summary if summary is not None else result),
     )
     return True
+
+
+def complete_task_with_gate(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    gate_name: str,
+    evidence_sha256: str,
+    result: Optional[str] = None,
+    summary: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    created_cards: Optional[Iterable[str]] = None,
+    expected_run_id: Optional[int] = None,
+    completion_gate_version: Optional[str] = None,
+) -> bool:
+    """Complete a task only when its configured gate and evidence match."""
+    gate_name = str(gate_name).strip()
+    if not gate_name:
+        raise ValueError("gate_name is required")
+    if not isinstance(evidence_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
+        raise ValueError("evidence_sha256 must be a lowercase 64-character hexadecimal digest")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError("metadata must be a dict")
+
+    trusted_metadata = dict(metadata or {})
+    trusted_metadata["completion_gate"] = gate_name
+    trusted_metadata["completion_evidence_sha256"] = evidence_sha256
+    if completion_gate_version is not None:
+        trusted_metadata["completion_gate_version"] = str(completion_gate_version)
+    return complete_task(
+        conn,
+        task_id,
+        result=result,
+        summary=summary,
+        metadata=trusted_metadata,
+        created_cards=created_cards,
+        expected_run_id=expected_run_id,
+        _trusted_gate_name=gate_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -9126,6 +9304,14 @@ def _default_spawn(
     if task.reasoning_effort:
         cmd.extend(["--reasoning", task.reasoning_effort])
     worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
+    worker_toolsets = [
+        name for name in (worker_toolsets or [])
+        if name not in {"docatlas-benchmark", "no_mcp"}
+    ]
+    if task.body and "\nbenchmark_lane: docatlas_once\n" in f"\n{task.body}\n":
+        worker_toolsets.append("docatlas-benchmark")
+    elif task.body and "\nbenchmark_lane: repo_only\n" in f"\n{task.body}\n":
+        worker_toolsets.append("no_mcp")
     if worker_toolsets:
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.extend([

@@ -6952,6 +6952,7 @@ def run_conversation(
 
                 try:
                     from agent.verification_stop import (
+                        apply_pre_verify_hook,
                         build_verify_on_stop_nudge,
                         verify_on_stop_enabled,
                     )
@@ -6962,6 +6963,18 @@ def run_conversation(
                             changed_paths=getattr(agent, "_turn_file_mutation_paths", set()),
                             attempts=getattr(agent, "_verification_stop_nudges", 0),
                         )
+                        if _verify_nudge:
+                            _verify_nudge = apply_pre_verify_hook(
+                                _verify_nudge,
+                                session_id=getattr(agent, "session_id", None),
+                                changed_paths=sorted(
+                                    str(path)
+                                    for path in getattr(
+                                        agent, "_turn_file_mutation_paths", set()
+                                    )
+                                ),
+                                attempts=getattr(agent, "_verification_stop_nudges", 0),
+                            )
                     else:
                         _verify_nudge = None
                 except Exception:

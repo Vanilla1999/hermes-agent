@@ -116,6 +116,8 @@ def ensure_dependency(
         return False
     if check():
         return True
+    if os.environ.get("HERMES_NO_AUTO_INSTALL") == "1":
+        return False
 
     script, shell = _find_install_script()
     if script is None:

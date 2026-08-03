@@ -202,6 +202,41 @@ def _status_detail(status: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def apply_pre_verify_hook(
+    nudge: str,
+    *,
+    session_id: str | None,
+    changed_paths: list[str],
+    attempts: int,
+) -> str:
+    """Let a plugin replace the first verification-stop continuation.
+
+    The core nudge is already fail-closed before this observer runs. Plugin
+    failure, missing plugins, and unsupported return values therefore retain it.
+    A verify-on-stop sequence may have follow-up retries, but this hook is
+    intentionally invoked only for its first continuation.
+    """
+    if attempts != 0:
+        return nudge
+    try:
+        from hermes_cli.plugins import invoke_hook
+
+        results = invoke_hook(
+            "pre_verify",
+            session_id=session_id,
+            changed_paths=changed_paths,
+            attempts=attempts,
+            nudge=nudge,
+        )
+    except Exception:
+        return nudge
+    for result in results:
+        continuation = result.get("continuation") if isinstance(result, dict) else result
+        if isinstance(continuation, str) and continuation.strip():
+            return continuation.strip()
+    return nudge
+
+
 def build_verify_on_stop_nudge(
     *,
     session_id: str | None,
@@ -270,4 +305,4 @@ def build_verify_on_stop_nudge(
     )
 
 
-__all__ = ["build_verify_on_stop_nudge", "verify_on_stop_enabled"]
+__all__ = ["apply_pre_verify_hook", "build_verify_on_stop_nudge", "verify_on_stop_enabled"]

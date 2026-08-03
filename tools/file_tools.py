@@ -239,6 +239,23 @@ def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
     return expanded
 
 
+def _container_workspace_cwd(configured: str | None) -> str | None:
+    docker_mount = os.environ.get("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "").lower()
+    host_workspace = _sentinel_free_abs_cwd(
+        os.environ.get("HERMES_KANBAN_WORKSPACE") or os.environ.get("TERMINAL_CWD")
+    )
+    if (
+        configured
+        and host_workspace
+        and os.environ.get("TERMINAL_ENV", "").lower() == "docker"
+        and docker_mount in {"1", "true", "yes", "on"}
+        and (configured == host_workspace or configured.startswith(host_workspace + os.sep))
+    ):
+        relative = os.path.relpath(configured, host_workspace)
+        return "/workspace" if relative == "." else str(Path("/workspace") / relative)
+    return configured
+
+
 def _configured_terminal_cwd() -> str | None:
     """Return ``$TERMINAL_CWD`` only when it names a real directory anchor.
 
@@ -247,7 +264,7 @@ def _configured_terminal_cwd() -> str | None:
     relative to, which is exactly the ambiguity that misroutes worktree edits.
     Only an absolute, sentinel-free value is honored.
     """
-    return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
+    return _container_workspace_cwd(_sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD")))
 
 
 def _registered_task_cwd_override(task_id: str = "default") -> str | None:
@@ -266,8 +283,64 @@ def _registered_task_cwd_override(task_id: str = "default") -> str | None:
     except Exception:
         return None
 
-    return _sentinel_free_abs_cwd(overrides.get("cwd"))
+    return _container_workspace_cwd(_sentinel_free_abs_cwd(overrides.get("cwd")))
 
+
+def _live_cwd_if_owned(env, task_id: str) -> str | None:
+    """The env's live cwd, but only when THIS session owns it.
+
+    The terminal env is shared (collapsed to the ``"default"`` container), so its
+    ``cwd`` tracks the LAST session that ran a command. With two worktree
+    sessions open, trusting it blindly routes one session's edits into the other
+    session's checkout (the wrong-worktree-patch bug). ``terminal_tool`` stamps
+    ``env.cwd_owner`` with the session that last drove the env; return its cwd
+    only when that owner matches the resolving session, else ``None`` so the
+    caller falls through to this session's own registered cwd override. Unknown
+    owner / ``default`` keys keep the prior behavior (single-session / CLI).
+    """
+    if env is None:
+        return None
+    live = getattr(env, "cwd", None)
+    if not live:
+        return None
+    owner = str(getattr(env, "cwd_owner", "") or "")
+    tid = str(task_id or "")
+    if owner and tid and owner != "default" and tid != "default" and owner != tid:
+        return None
+    return _container_workspace_cwd(live)
+
+
+def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
+    """Return the task's live terminal cwd for bookkeeping when available."""
+    try:
+        from tools.terminal_tool import _resolve_container_task_id
+        container_key = _resolve_container_task_id(task_id)
+    except Exception:
+        container_key = task_id
+
+    with _file_ops_lock:
+        cached = _file_ops_cache.get(container_key) or _file_ops_cache.get(task_id)
+    if cached is not None:
+        env = getattr(cached, "env", None)
+        live_cwd = _live_cwd_if_owned(env, task_id)
+        if live_cwd:
+            return live_cwd
+        # Legacy: a cache entry carrying its own cwd with no env to own it.
+        if env is None and getattr(cached, "cwd", None):
+            return getattr(cached, "cwd", None)
+
+    try:
+        from tools.terminal_tool import _active_environments, _env_lock
+
+        with _env_lock:
+            env = _active_environments.get(container_key) or _active_environments.get(task_id)
+        live_cwd = _live_cwd_if_owned(env, task_id)
+        if live_cwd:
+            return live_cwd
+    except Exception:
+        pass
+
+    return None
 
 def _authoritative_workspace_root(task_id: str = "default") -> str | None:
     """Best-effort absolute workspace root for divergence checks.
@@ -374,6 +447,7 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
     container_paths = _uses_container_paths(task_id)
     if container_paths:
         expanded = _expand_tilde(filepath)
+        expanded = _container_workspace_cwd(expanded) or expanded
         if posixpath.isabs(expanded):
             return _normalize_without_host_deref(expanded)
         resolved = _resolve_base_dir(task_id, container_paths=True) / expanded
@@ -1204,6 +1278,8 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "container_persistent": config.get("container_persistent", True),
                     "vercel_runtime": config.get("vercel_runtime", ""),
                     "docker_volumes": config.get("docker_volumes", []),
+                    "docker_network": config.get("docker_network", True),
+                    "docker_mount_host_data": config.get("docker_mount_host_data", True),
                     "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                     "docker_forward_env": config.get("docker_forward_env", []),
                     "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
@@ -1426,7 +1502,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
 
         # ── Perform the read ──────────────────────────────────────────
         file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
+        result = file_ops.read_file(resolved_str, offset, limit)
         result_dict = result.to_dict()
 
         # ── Populate negative-result cache on not-found ───────────────
