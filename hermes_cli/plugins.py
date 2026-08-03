@@ -405,6 +405,24 @@ class PluginContext:
         except Exception:
             return "default"
 
+    @property
+    def session_id(self) -> str:
+        """Return the active session id when the host has established one."""
+        cli = getattr(self._manager, "_cli_ref", None)
+        agent = getattr(cli, "agent", None)
+        value = getattr(agent, "session_id", "")
+        if value:
+            return str(value)
+        try:
+            from gateway.session_context import get_current_session_id
+
+            value = get_current_session_id()
+            if value:
+                return str(value)
+        except Exception:
+            pass
+        return os.environ.get("HERMES_SESSION_ID", "")
+
     # -- tool registration --------------------------------------------------
 
     def register_tool(

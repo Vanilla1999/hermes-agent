@@ -79,6 +79,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "model_override": t.model_override,
         "provider_override": t.provider_override,
         "session_id": t.session_id,
+        "completion_gate": t.completion_gate,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
     }
@@ -354,6 +355,11 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "durations (90s, 30m, 2h, 1d). When exceeded, "
                                "the dispatcher SIGTERMs (then SIGKILLs) the worker "
                                "and re-queues the task.")
+    p_create.add_argument(
+        "--completion-gate",
+        default=None,
+        help="Named completion protocol required before this task may be marked done.",
+    )
     p_create.add_argument("--created-by", default="user",
                           help="Author name recorded on the task (default: user)")
     p_create.add_argument("--skill", action="append", default=[], dest="skills",
@@ -1519,6 +1525,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
+            completion_gate=getattr(args, "completion_gate", None),
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
@@ -2213,13 +2220,23 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                         failed.append(tid)
                         continue
 
-            if not kb.complete_task(
-                conn, tid,
-                result=args.result,
-                summary=summary,
-                metadata=metadata,
-                expected_run_id=_worker_run_id_for(tid),
-            ):
+            try:
+                ok = kb.complete_task(
+                    conn, tid,
+                    result=args.result,
+                    summary=summary,
+                    metadata=metadata,
+                    expected_run_id=_worker_run_id_for(tid),
+                )
+            except kb.CompletionGateRequiredError as gate_err:
+                failed.append(tid)
+                print(
+                    f"cannot complete {tid}: requires completion gate "
+                    f"{gate_err.gate_name}",
+                    file=sys.stderr,
+                )
+                continue
+            if not ok:
                 failed.append(tid)
                 print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
             else:

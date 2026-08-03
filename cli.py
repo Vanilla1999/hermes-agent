@@ -450,6 +450,8 @@ def load_cli_config() -> Dict[str, Any]:
             "home_mode": "auto",
             "lifetime_seconds": 300,
             "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
+            "docker_network": True,
+            "docker_mount_host_data": True,
             "docker_forward_env": [],
             "singularity_image": "docker://nikolaik/python-nodejs:python3.11-nodejs20",
             "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
@@ -663,6 +665,8 @@ def load_cli_config() -> Dict[str, Any]:
         "home_mode": "TERMINAL_HOME_MODE",
         "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
         "docker_image": "TERMINAL_DOCKER_IMAGE",
+        "docker_network": "TERMINAL_DOCKER_NETWORK",
+        "docker_mount_host_data": "TERMINAL_DOCKER_MOUNT_HOST_DATA",
         "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
         "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
         "modal_image": "TERMINAL_MODAL_IMAGE",
@@ -4463,7 +4467,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # live registry aliases (registered during discover_mcp_tools),
             # but discovery hasn't run yet at this point, so exclude them.
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
-            invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
+            invalid = [
+                t for t in toolsets
+                if not validate_toolset(t) and t not in mcp_names and t != "no_mcp"
+            ]
             if invalid:
                 self._console_print(f"[bold red]Warning: Unknown toolsets: {', '.join(invalid)}[/]")
         
@@ -14630,7 +14637,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         msg_count = len(self.conversation_history)
         if msg_count > 0:
             user_msgs = len([m for m in self.conversation_history if m.get("role") == "user"])
-            tool_calls = len([m for m in self.conversation_history if m.get("role") == "tool" or m.get("tool_calls")])
+            tool_calls = sum(
+                len(m.get("tool_calls") or [])
+                for m in self.conversation_history
+                if isinstance(m.get("tool_calls"), list)
+            )
             elapsed = datetime.now() - self.session_start
             hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
             minutes, seconds = divmod(remainder, 60)

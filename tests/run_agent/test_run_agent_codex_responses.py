@@ -325,6 +325,77 @@ def test_build_api_kwargs_mantle_sets_extended_prompt_cache_retention(monkeypatc
     assert kwargs["prompt_cache_retention"] == "24h"
 
 
+def test_dispatcher_profile_tools_reach_provider_request(monkeypatch):
+    from hermes_cli._parser import build_top_level_parser
+    from tools import tool_search
+
+    parser, _subparsers, _chat_parser = build_top_level_parser()
+    resolved = "bounded-engineering,file,kanban,skills,terminal"
+    args = parser.parse_args(["--toolsets", resolved, "chat", "-q", "work task"])
+    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("HERMES_TENANT", "bounded-engineering/v1")
+    monkeypatch.setattr(
+        tool_search,
+        "load_config",
+        lambda: tool_search.ToolSearchConfig.from_raw(False),
+    )
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        provider="openai-codex",
+        api_key="codex-token",
+        enabled_toolsets=args.toolsets.split(","),
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "Ping"}])
+    captured = {}
+    responses = SimpleNamespace(create=lambda **request: captured.update(request))
+
+    responses.create(**kwargs)
+
+    names = [tool["name"] for tool in captured["tools"]]
+    assert names == [
+        "engineering_block", "engineering_complete", "engineering_status", "engineering_verify",
+        "patch", "read_file", "search_files", "terminal", "write_file",
+    ]
+
+
+def test_build_api_kwargs_codex_clamps_minimal_effort(monkeypatch):
+    """'minimal' reasoning effort is clamped to 'low' on the Responses API.
+
+    GPT-5.4 supports none/low/medium/high/xhigh but NOT 'minimal'.
+    Users may configure 'minimal' via OpenRouter conventions, so the Codex
+    Responses path must clamp it to the nearest supported level.
+    """
+    _patch_agent_bootstrap(monkeypatch)
+    agent = run_agent.AIAgent(
+        model="gpt-5-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="codex-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+        reasoning_config={"enabled": True, "effort": "minimal"},
+    )
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+
+    kwargs = agent._build_api_kwargs(
+        [
+            {"role": "system", "content": "You are Hermes."},
+            {"role": "user", "content": "Ping"},
+        ]
+    )
+
+    assert kwargs["reasoning"]["effort"] == "low"
+
+
 
 
 
@@ -1981,8 +2052,6 @@ def test_duplicate_detection_uses_commentary_when_hidden_reasoning_changes(monke
     reasoning_items = interim_msgs[0].get("codex_reasoning_items")
     if reasoning_items:
         assert reasoning_items[0].get("id") == "rs_second"
-
-
 
 
 

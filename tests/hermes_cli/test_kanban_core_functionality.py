@@ -389,6 +389,44 @@ def test_migration_renames_legacy_event_kinds(tmp_path, monkeypatch):
 
 
 
+def test_parse_duration_rejects_garbage():
+    from hermes_cli.kanban import _parse_duration
+    import pytest as _p
+    with _p.raises(ValueError):
+        _parse_duration("tenminutes")
+    with _p.raises(ValueError):
+        _parse_duration("fish")
+
+
+def test_cli_create_max_runtime_via_duration(kanban_home):
+    """`hermes kanban create --max-runtime 2h` should persist 7200 seconds."""
+    out = run_slash("create 'long task' --max-runtime 2h --json")
+    data = json.loads(out)
+    tid = data["id"]
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        assert task.max_runtime_seconds == 7200
+    finally:
+        conn.close()
+
+
+def test_cli_create_completion_gate_round_trips_in_json(kanban_home):
+    out = run_slash(
+        "create 'gated task' --completion-gate bounded-engineering/v1 --json"
+    )
+    data = json.loads(out)
+    assert data["completion_gate"] == "bounded-engineering/v1"
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, data["id"]).completion_gate == "bounded-engineering/v1"
+    finally:
+        conn.close()
+
+
+def test_cli_create_max_runtime_bad_format_exits_nonzero(kanban_home):
+    out = run_slash("create 'bad' --max-runtime fish")
+    assert "max-runtime" in out.lower() or "malformed" in out.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1406,5 +1444,4 @@ def test_notify_sub_starts_caught_up_on_active_task(kanban_home):
         assert events == [], "historical events must not replay to a new sub"
     finally:
         conn.close()
-
 

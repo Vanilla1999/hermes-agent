@@ -3187,6 +3187,8 @@ TERMINAL_CONFIG_ENV_MAP = {
     "timeout": "TERMINAL_TIMEOUT",
     "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
     "docker_image": "TERMINAL_DOCKER_IMAGE",
+    "docker_network": "TERMINAL_DOCKER_NETWORK",
+    "docker_mount_host_data": "TERMINAL_DOCKER_MOUNT_HOST_DATA",
     "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
     "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
     "modal_image": "TERMINAL_MODAL_IMAGE",

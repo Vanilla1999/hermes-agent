@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import os
 import sqlite3
 import subprocess
@@ -75,6 +76,82 @@ def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypa
         (fake_msvcrt.LK_NBLCK, 1),
         (fake_msvcrt.LK_UNLCK, 1),
     ]
+
+
+def test_board_creation_lock_posix_contention_times_out_bounded(tmp_path, monkeypatch):
+    fake_fcntl = types.SimpleNamespace(
+        LOCK_EX=1,
+        LOCK_NB=2,
+        LOCK_UN=8,
+        flock=lambda fd, mode: (_ for _ in ()).throw(BlockingIOError("busy")),
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(kb, "_IS_WINDOWS", False)
+    monkeypatch.setattr(kb, "_BOARD_LOCK_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(kb, "_BOARD_LOCK_POLL_SECONDS", 0.0)
+    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+
+    with pytest.raises(kb.BoardLockTimeoutError, match="timed out acquiring"):
+        with kb.board_creation_lock("contended"):
+            pytest.fail("must never proceed without the lock")
+
+
+def test_board_creation_lock_windows_uses_existing_byte_and_unlocks(tmp_path, monkeypatch):
+    calls: list[tuple[int, int, int, int]] = []
+    fake_msvcrt = types.SimpleNamespace(LK_NBLCK=3, LK_UNLCK=2)
+
+    def locking(fd, mode, nbytes):
+        calls.append((fd, mode, nbytes, os.fstat(fd).st_size))
+
+    fake_msvcrt.locking = locking
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(kb, "_IS_WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    with kb.board_creation_lock("windows-board"):
+        pass
+
+    assert [(mode, nbytes, size) for _, mode, nbytes, size in calls] == [
+        (fake_msvcrt.LK_NBLCK, 1, 1),
+        (fake_msvcrt.LK_UNLCK, 1, 1),
+    ]
+
+
+def test_create_board_lock_failure_does_not_mutate_board(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    @contextlib.contextmanager
+    def unavailable(_board):
+        raise kb.BoardLockError("lock denied")
+        yield
+
+    monkeypatch.setattr(kb, "board_creation_lock", unavailable)
+    with pytest.raises(kb.BoardLockError, match="lock denied"):
+        kb.create_board("must-not-exist")
+
+    assert not kb.board_metadata_path("must-not-exist").exists()
+    assert not kb.kanban_db_path("must-not-exist").exists()
+
+
+def test_connect_rejects_tls_record_in_sqlite_header(tmp_path, monkeypatch):
+    """Kanban should classify TLS-looking page-0 clobbers before WAL setup."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    corrupt = home / "kanban.db"
+    corrupt.write_bytes(b"SQLit" + bytes.fromhex("17 03 03 00 13") + b"x" * 32)
+
+    with pytest.raises(sqlite3.DatabaseError) as exc_info:
+        kb.connect(board="default")
+
+    msg = str(exc_info.value)
+    assert "file is not a database" in msg
+    assert "TLS record header detected at byte offset 5" in msg
+    assert "53 51 4c 69 74 17 03 03 00 13" in msg
 
 
 def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
@@ -371,6 +448,111 @@ def test_respawn_guard_defers_rate_limited_within_cooldown(
 
 
 
+def test_gated_task_rejects_ordinary_completion(kanban_home):
+    """A task with a completion gate must fail closed on the ordinary API."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="gated completion",
+            completion_gate="bounded-engineering/v1",
+        )
+
+        with pytest.raises(kb.CompletionGateRequiredError) as exc_info:
+            kb.complete_task(conn, tid, summary="ordinary completion")
+
+        assert exc_info.value.task_id == tid
+        assert exc_info.value.gate_name == "bounded-engineering/v1"
+        assert kb.get_task(conn, tid).status == "ready"
+        assert not any(event.kind == "completed" for event in kb.list_events(conn, tid))
+
+
+def test_gated_task_completes_with_matching_gate_and_evidence(kanban_home):
+    evidence_sha256 = "a" * 64
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="gated completion",
+            completion_gate="bounded-engineering/v1",
+        )
+
+        assert kb.complete_task_with_gate(
+            conn,
+            tid,
+            gate_name="bounded-engineering/v1",
+            evidence_sha256=evidence_sha256,
+            summary="verified completion",
+            metadata={"changed_files": ["hermes_cli/kanban_db.py"]},
+        )
+
+        assert kb.get_task(conn, tid).status == "done"
+        run = kb.latest_run(conn, tid)
+        assert run.metadata["completion_gate"] == "bounded-engineering/v1"
+        assert run.metadata["completion_evidence_sha256"] == evidence_sha256
+        completed = [event for event in kb.list_events(conn, tid) if event.kind == "completed"]
+        assert completed[-1].payload["completion_gate"] == "bounded-engineering/v1"
+        assert completed[-1].payload["completion_evidence_sha256"] == evidence_sha256
+
+
+def test_gated_completion_rejects_invalid_gate_digest_and_stale_run(kanban_home):
+    digest = "b" * 64
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="gated completion",
+            assignee="worker",
+            completion_gate="bounded-engineering/v1",
+        )
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+
+        assert not kb.complete_task_with_gate(
+            conn,
+            tid,
+            gate_name="wrong-gate",
+            evidence_sha256=digest,
+        )
+        with pytest.raises(ValueError, match="evidence_sha256"):
+            kb.complete_task_with_gate(
+                conn,
+                tid,
+                gate_name="bounded-engineering/v1",
+                evidence_sha256="not-a-digest",
+            )
+        assert not kb.complete_task_with_gate(
+            conn,
+            tid,
+            gate_name="bounded-engineering/v1",
+            evidence_sha256=digest,
+            expected_run_id=claimed.current_run_id + 1,
+        )
+        assert kb.get_task(conn, tid).status == "running"
+
+
+def test_gated_completion_is_idempotent_after_success(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="gated completion",
+            completion_gate="bounded-engineering/v1",
+        )
+        kwargs = {
+            "gate_name": "bounded-engineering/v1",
+            "evidence_sha256": "c" * 64,
+            "summary": "verified",
+        }
+        assert kb.complete_task_with_gate(conn, tid, **kwargs)
+        assert not kb.complete_task_with_gate(conn, tid, **kwargs)
+        assert len([e for e in kb.list_events(conn, tid) if e.kind == "completed"]) == 1
+
+
+def test_block_then_unblock(kanban_home):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="x", assignee="a")
+        kb.claim_task(conn, t)
+        assert kb.block_task(conn, t, reason="need input")
+        assert kb.get_task(conn, t).status == "blocked"
+        assert kb.unblock_task(conn, t)
+        assert kb.get_task(conn, t).status == "ready"
 
 
 
@@ -859,6 +1041,55 @@ class TestSharedBoardPaths:
 
 
 
+@pytest.mark.parametrize(
+    ("lane", "expected", "unexpected"),
+    [
+        ("repo_only", "no_mcp", "docatlas-benchmark"),
+        ("docatlas_once", "docatlas-benchmark", "no_mcp"),
+    ],
+)
+def test_benchmark_spawn_pins_lane_mcp_toolsets(
+    tmp_path, monkeypatch, lane, expected, unexpected,
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(
+        kb, "_resolve_worker_cli_toolsets",
+        lambda _: ["bounded-engineering", "docatlas-benchmark"],
+    )
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            self.pid = 4242
+
+    monkeypatch.setattr("subprocess.Popen", _FakePopen)
+    task = kb.Task(
+        id=f"t_{lane}", title="benchmark", body=f"benchmark_lane: {lane}\n",
+        assignee="bounded-engineer", status="ready", priority=0, created_by=None,
+        created_at=0, started_at=None, completed_at=None, workspace_kind="worktree",
+        workspace_path=str(tmp_path / "workspace"), claim_lock=None, claim_expires=None,
+        tenant="bounded-engineering/v1", branch_name=f"be/{lane}",
+    )
+
+    kb._default_spawn(task, str(tmp_path / "workspace"))
+
+    toolsets = captured["cmd"][captured["cmd"].index("--toolsets") + 1].split(",")
+    assert expected in toolsets
+    assert unexpected not in toolsets
+
+
+def test_latest_summary_returns_summary_after_complete(kanban_home):
+    """``complete_task(summary=...)`` is the canonical kanban-worker
+    handoff; ``latest_summary`` must surface it so dashboards/CLI can
+    render what the worker actually did."""
+    handoff = "shipped 3 files, ran tests, opened PR #42"
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="work", assignee="alice")
+        kb.complete_task(conn, t, summary=handoff)
+        assert kb.latest_summary(conn, t) == handoff
 
 
 

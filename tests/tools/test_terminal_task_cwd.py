@@ -173,6 +173,97 @@ def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monk
     }]
 
 
+def test_registering_cwd_override_updates_live_env_cwd(monkeypatch):
+    """An ACP ``update_cwd`` (re-)registered mid-session must win over a
+    previously ``cd``-ed live ``env.cwd``.
+
+    Preferring live ``env.cwd`` (so session-local ``cd`` survives) means a
+    freshly registered ``cwd`` override would otherwise sit *below* the
+    already-set ``env.cwd`` and be silently ignored. ``register_task_env_overrides``
+    syncs the new cwd onto the live cached env so an explicit ACP project-root
+    change takes effect, as the editor client expects.
+    """
+
+    class FakeEnv:
+        env = {}
+        cwd = "/workspace/old"
+
+    task_id = "acp-session-update"
+    fake_env = FakeEnv()
+    monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: fake_env})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+
+    terminal_tool.register_task_env_overrides(task_id, {"cwd": "/workspace/new"})
+
+    # The live env now reflects the editor's new project root.
+    assert fake_env.cwd == "/workspace/new"
+
+    # A subsequent command resolves to the new cwd (env.cwd precedence).
+    assert terminal_tool._resolve_command_cwd(
+        workdir=None,
+        env=fake_env,
+        default_cwd="/workspace/config",
+        session_key=task_id,
+    ) == "/workspace/new"
+
+
+def test_registering_cwd_override_noop_when_no_live_env(monkeypatch):
+    """Registering an override before the env exists must not crash; the cwd
+    is applied at env creation time instead."""
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+
+    # Should not raise even though no env is cached yet.
+    terminal_tool.register_task_env_overrides("acp-session-pending", {"cwd": "/workspace/new"})
+
+    assert terminal_tool._task_env_overrides["acp-session-pending"] == {"cwd": "/workspace/new"}
+
+
+def test_resolve_command_cwd_maps_explicit_docker_host_workspace(tmp_path):
+    class FakeEnv:
+        _workspace_host_cwd = str(tmp_path)
+        cwd = "/workspace"
+
+    assert terminal_tool._resolve_command_cwd(
+        workdir=str(tmp_path / "src"), env=FakeEnv(), default_cwd="/workspace"
+    ) == "/workspace/src"
+    assert terminal_tool._resolve_command_cwd(
+        workdir="/tmp/build", env=FakeEnv(), default_cwd="/workspace"
+    ) == "/tmp/build"
+
+
+def test_registering_non_cwd_override_leaves_live_env_cwd_untouched(monkeypatch):
+    """A non-cwd override (e.g. a per-task Modal image) must not disturb the
+    live env's cwd."""
+
+    class FakeEnv:
+        env = {}
+        cwd = "/workspace/keep"
+
+    task_id = "rl-rollout-1"
+    fake_env = FakeEnv()
+    monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: fake_env})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+
+    terminal_tool.register_task_env_overrides(task_id, {"modal_image": "custom:latest"})
+
+    assert fake_env.cwd == "/workspace/keep"
+
+
+def test_safe_getcwd_returns_real_cwd(monkeypatch):
+    monkeypatch.setattr(terminal_tool.os, "getcwd", lambda: "/home/user/project")
+    assert terminal_tool._safe_getcwd() == "/home/user/project"
+
+
+def test_safe_getcwd_falls_back_to_terminal_cwd_when_cwd_deleted(monkeypatch):
+    def _boom():
+        raise FileNotFoundError("[Errno 2] No such file or directory")
+
+    monkeypatch.setattr(terminal_tool.os, "getcwd", _boom)
+    monkeypatch.setenv("TERMINAL_CWD", "/srv/work")
+    assert terminal_tool._safe_getcwd() == "/srv/work"
+
+
 def test_safe_getcwd_falls_back_to_home_when_no_terminal_cwd(monkeypatch):
     def _boom():
         raise FileNotFoundError()

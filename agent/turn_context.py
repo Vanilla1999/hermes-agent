@@ -1050,6 +1050,7 @@ def build_turn_context(
 
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
+    plugin_block_message = ""
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
         _pre_results = _invoke_hook(
@@ -1080,6 +1081,11 @@ def build_turn_context(
             _spill_config_cached = None
         for r in _pre_results:
             _piece: str = ""
+            if isinstance(r, dict) and r.get("action") == "block":
+                plugin_block_message = str(
+                    r.get("message") or "pre_llm_call blocked the provider request"
+                )
+                break
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
             elif isinstance(r, str) and r.strip():
@@ -1101,6 +1107,8 @@ def build_turn_context(
             plugin_user_context = "\n\n".join(_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
+    if plugin_block_message:
+        raise RuntimeError(plugin_block_message)
 
     # Gateway must-deliver notes (auto-reset note, first-contact intro,
     # voice-channel change) ride the same user-message injection channel as

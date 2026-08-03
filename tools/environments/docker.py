@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -37,6 +38,32 @@ _DOCKER_SEARCH_PATHS = [
 ]
 
 _docker_executable: Optional[str] = None  # resolved once, cached
+
+
+def _linked_worktree_git_mount(host_cwd: str) -> Optional[tuple[Path, Path]]:
+    """Return validated shared Git metadata needed by a mounted linked worktree."""
+    marker = Path(host_cwd) / ".git"
+    if marker.is_symlink() or not marker.is_file():
+        return None
+    try:
+        prefix, raw_gitdir = marker.read_text(encoding="utf-8").strip().split(":", 1)
+        raw_gitdir_path = Path(raw_gitdir.strip())
+        container_gitdir = raw_gitdir_path if raw_gitdir_path.is_absolute() else (Path("/workspace") / raw_gitdir_path).resolve()
+        gitdir = raw_gitdir_path if raw_gitdir_path.is_absolute() else (marker.parent / raw_gitdir_path).resolve()
+        if prefix != "gitdir" or not gitdir.is_dir():
+            return None
+        backlink = Path((gitdir / "gitdir").read_text(encoding="utf-8").strip())
+        if not backlink.is_absolute():
+            backlink = (gitdir / backlink).resolve()
+        if backlink.resolve() != marker.resolve():
+            return None
+        raw_commondir = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        common = (gitdir / raw_commondir).resolve()
+        if common.name != ".git" or gitdir.parent.parent.resolve() != common or not common.is_dir():
+            return None
+        return common, (container_gitdir / raw_commondir).resolve()
+    except (OSError, ValueError):
+        return None
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EGRESS_LABEL_KEY = "hermes-egress"
 
@@ -784,13 +811,19 @@ def _ensure_docker_available() -> None:
         )
 
     try:
-        result = subprocess.run(
-            [docker_exe, "version"],
-            capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
-            timeout=5,
-            stdin=subprocess.DEVNULL,
-        )
+        attempts = 3 if os.environ.get("HERMES_NO_AUTO_INSTALL") == "1" else 1
+        for attempt in range(attempts):
+            result = subprocess.run(
+                [docker_exe, "version"],
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+                timeout=5,
+                stdin=subprocess.DEVNULL,
+            )
+            if result.returncode == 0:
+                break
+            if attempt + 1 < attempts and "permission denied" in result.stderr.lower():
+                time.sleep(0.25)
     except FileNotFoundError:
         logger.error(
             "Docker backend selected but the resolved docker executable '%s' could "
@@ -870,11 +903,13 @@ class DockerEnvironment(BaseEnvironment):
         extra_args: list = None,
         persist_across_processes: bool = True,
         shm_size: str = _DEFAULT_SHM_SIZE,
+        mount_host_data: bool = True,
     ):
         if cwd == "~":
             cwd = "/root"
         super().__init__(cwd=cwd, timeout=timeout)
         self._persistent = persistent_filesystem
+        persist_across_processes = bool(persist_across_processes and network)
         self._persist_across_processes = persist_across_processes
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
@@ -952,6 +987,7 @@ class DockerEnvironment(BaseEnvironment):
             and os.path.isdir(host_cwd_abs)
             and not workspace_explicitly_mounted
         )
+        self._workspace_host_cwd = host_cwd_abs if bind_host_cwd else None
         if auto_mount_cwd and host_cwd and not os.path.isdir(host_cwd_abs):
             logger.debug("Skipping docker cwd mount: host_cwd is not a valid directory: %s", host_cwd)
 
@@ -984,17 +1020,24 @@ class DockerEnvironment(BaseEnvironment):
         if bind_host_cwd:
             logger.info("Mounting configured host cwd to /workspace: %s", host_cwd_abs)
             volume_args = ["-v", f"{host_cwd_abs}:/workspace", *volume_args]
+            git_mount = _linked_worktree_git_mount(host_cwd_abs)
+            if git_mount is not None:
+                git_metadata, git_destination = git_mount
+                volume_args = ["-v", f"{git_metadata}:{git_destination}:ro", *volume_args]
         elif workspace_explicitly_mounted:
             logger.debug("Skipping docker cwd mount: /workspace already mounted by user config")
 
         # Mount credential files (OAuth tokens, etc.) declared by skills.
         # Read-only so the container can authenticate but not modify host creds.
         try:
-            from tools.credential_files import (
-                get_credential_file_mounts,
-                get_skills_directory_mount,
-                get_cache_directory_mounts,
-            )
+            if mount_host_data:
+                from tools.credential_files import (
+                    get_credential_file_mounts,
+                    get_skills_directory_mount,
+                    get_cache_directory_mounts,
+                )
+            else:
+                get_credential_file_mounts = get_skills_directory_mount = get_cache_directory_mounts = lambda: []
 
             for mount_entry in get_credential_file_mounts():
                 src = Path(mount_entry["host_path"])
@@ -1306,6 +1349,8 @@ class DockerEnvironment(BaseEnvironment):
             if not isinstance(arg, str):
                 logger.warning("Ignoring non-string docker_extra_args entry: %r", arg)
                 continue
+            if not network and (arg in {"--network", "--net"} or arg.startswith(("--network=", "--net="))):
+                raise ValueError("docker_extra_args cannot override disabled Docker network")
             validated_extra.append(arg)
         if egress_env_overrides:
             _extra_collisions = _extra_args_egress_collisions(

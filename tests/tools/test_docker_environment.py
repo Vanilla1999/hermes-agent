@@ -1,6 +1,7 @@
 import logging
 import os
 from io import StringIO
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -55,7 +56,27 @@ def _make_dummy_env(**kwargs):
         extra_args=kwargs.get("extra_args", []),
         persist_across_processes=kwargs.get("persist_across_processes", True),
         shm_size=kwargs.get("shm_size", docker_env._DEFAULT_SHM_SIZE),
+        mount_host_data=kwargs.get("mount_host_data", True),
     )
+
+
+@pytest.mark.parametrize("flag", ["--network=host", "--net=host", "--network", "--net"])
+def test_network_disabled_rejects_conflicting_extra_args(monkeypatch, flag):
+    _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "docker")
+    with pytest.raises(ValueError, match="cannot override disabled Docker network"):
+        _make_dummy_env(network=False, extra_args=[flag])
+
+
+def test_mount_host_data_false_adds_no_bind_mounts(monkeypatch):
+    calls = _mock_subprocess_run(monkeypatch)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "docker")
+    env = _make_dummy_env(mount_host_data=False, persistent_filesystem=False)
+    try:
+        run_cmd = next(cmd for cmd, _ in calls if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "run")
+        assert "-v" not in run_cmd
+    finally:
+        env.cleanup()
 
 
 def test_ensure_docker_available_logs_and_raises_when_not_found(monkeypatch, caplog):
@@ -80,6 +101,74 @@ def test_ensure_docker_available_logs_and_raises_when_not_found(monkeypatch, cap
     )
 
 
+def test_ensure_docker_available_logs_and_raises_on_timeout(monkeypatch, caplog):
+    """When docker version times out, surface a helpful error instead of hanging."""
+
+    def _raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["/custom/docker", "version"], timeout=5)
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/custom/docker")
+    monkeypatch.setattr(docker_env.subprocess, "run", _raise_timeout)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError) as excinfo:
+            _make_dummy_env()
+
+    assert "Docker daemon is not responding" in str(excinfo.value)
+    assert any(
+        "/custom/docker version' timed out" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_ensure_docker_available_uses_resolved_executable(monkeypatch):
+    """When docker is found outside PATH, preflight should use that resolved path."""
+
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/opt/homebrew/bin/docker")
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+
+    docker_env._ensure_docker_available()
+
+    assert calls == [
+        (["/opt/homebrew/bin/docker", "version"], {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": 5,
+            "stdin": subprocess.DEVNULL,
+        })
+    ]
+
+
+def test_bounded_worker_retries_transient_docker_socket_permission(monkeypatch):
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, 0 if len(calls) == 2 else 1, stdout="", stderr="permission denied",
+        )
+
+    monkeypatch.setenv("HERMES_NO_AUTO_INSTALL", "1")
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+    monkeypatch.setattr(docker_env.time, "sleep", lambda delay: None)
+
+    docker_env._ensure_docker_available()
+
+    assert calls == [
+        ["/usr/bin/docker", "version"],
+        ["/usr/bin/docker", "version"],
+    ]
+
+
 def test_auto_mount_host_cwd_adds_volume(monkeypatch, tmp_path):
     """Opt-in docker cwd mounting should bind the host cwd to /workspace."""
     project_dir = tmp_path / "my-project"
@@ -99,6 +188,115 @@ def test_auto_mount_host_cwd_adds_volume(monkeypatch, tmp_path):
     assert run_calls, "docker run should have been called"
     run_args_str = " ".join(run_calls[0][0])
     assert f"{project_dir}:/workspace" in run_args_str
+
+
+def test_auto_mount_linked_worktree_adds_read_only_git_metadata(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    common = project / ".git"
+    gitdir = common / "worktrees" / "worker"
+    workspace = tmp_path / "worker"
+    gitdir.mkdir(parents=True)
+    workspace.mkdir()
+    marker = workspace / ".git"
+    marker.write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    (gitdir / "gitdir").write_text(str(marker), encoding="utf-8")
+    (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(cwd="/workspace", host_cwd=str(workspace), auto_mount_cwd=True)
+
+    run_cmd = next(cmd for cmd, _ in calls if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "run")
+    assert f"{common.resolve()}:{common.resolve()}:ro" in run_cmd
+
+
+def test_auto_mount_linked_worktree_accepts_relative_gitdir(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    common = project / ".git"
+    gitdir = common / "worktrees" / "worker"
+    workspace = project / "worktrees" / "worker"
+    gitdir.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    marker = workspace / ".git"
+    marker.write_text(f"gitdir: {os.path.relpath(gitdir, workspace)}\n", encoding="utf-8")
+    (gitdir / "gitdir").write_text(os.path.relpath(marker, gitdir), encoding="utf-8")
+    (gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(cwd="/workspace", host_cwd=str(workspace), auto_mount_cwd=True)
+
+    run_cmd = next(cmd for cmd, _ in calls if isinstance(cmd, list) and len(cmd) > 1 and cmd[1] == "run")
+    container_gitdir = (Path("/workspace") / os.path.relpath(gitdir, workspace)).resolve()
+    container_common = (container_gitdir / "../..").resolve()
+    assert f"{common.resolve()}:{container_common}:ro" in run_cmd
+
+
+def test_auto_mount_disabled_by_default(monkeypatch, tmp_path):
+    """Host cwd should not be mounted unless the caller explicitly opts in."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(
+        cwd="/root",
+        host_cwd=str(project_dir),
+        auto_mount_cwd=False,
+    )
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args_str = " ".join(run_calls[0][0])
+    assert f"{project_dir}:/workspace" not in run_args_str
+
+
+def test_auto_mount_skipped_when_workspace_already_mounted(monkeypatch, tmp_path):
+    """Explicit user volumes for /workspace should take precedence over cwd mount."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(
+        cwd="/workspace",
+        host_cwd=str(project_dir),
+        auto_mount_cwd=True,
+        volumes=[f"{other_dir}:/workspace"],
+    )
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args_str = " ".join(run_calls[0][0])
+    assert f"{other_dir}:/workspace" in run_args_str
+    assert run_args_str.count(":/workspace") == 1
+
+
+def test_auto_mount_replaces_persistent_workspace_bind(monkeypatch, tmp_path):
+    """Persistent mode should still prefer the configured host cwd at /workspace."""
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(
+        cwd="/workspace",
+        persistent_filesystem=True,
+        host_cwd=str(project_dir),
+        auto_mount_cwd=True,
+        task_id="test-persistent-auto-mount",
+    )
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    assert run_calls, "docker run should have been called"
+    run_args_str = " ".join(run_calls[0][0])
+    assert f"{project_dir}:/workspace" in run_args_str
+    assert "/sandboxes/docker/test-persistent-auto-mount/workspace:/workspace" not in run_args_str
 
 
 def test_non_persistent_cleanup_removes_container(monkeypatch):

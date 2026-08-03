@@ -257,6 +257,12 @@ _LEGACY_TOOLSET_MAP = {
     "tts_tools": ["text_to_speech"],
 }
 
+_BOUNDED_ENGINEERING_TOOLS = {
+    "engineering_block", "engineering_complete", "engineering_status", "engineering_verify",
+    "mcp_docatlas_benchmark_get_docs_context",
+    "patch", "read_file", "search_files", "terminal", "write_file",
+}
+
 
 # =============================================================================
 # get_tool_definitions  (the main schema provider)
@@ -460,6 +466,9 @@ def _compute_tool_definitions(
                     print(f"🚫 Disabled legacy toolset '{toolset_name}': {', '.join(legacy_tools)}")
             elif not quiet_mode:
                 print(f"⚠️  Unknown toolset: {toolset_name}")
+
+    if os.environ.get("HERMES_TENANT") == "bounded-engineering/v1":
+        tools_to_include.intersection_update(_BOUNDED_ENGINEERING_TOOLS)
 
     # Plugin-registered tools are now resolved through the normal toolset
     # path — validate_toolset() / resolve_toolset() / get_all_toolsets()

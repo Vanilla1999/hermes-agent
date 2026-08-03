@@ -1460,6 +1460,12 @@ def _ensure_terminal_env_bridged() -> None:
 
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
+    # Kanban workers start in a fresh process after profile selection. Bridge
+    # that profile's terminal section here so Docker is never initialized from
+    # stale pre-profile environment values.
+    from hermes_cli.config import apply_terminal_config_to_env
+    apply_terminal_config_to_env()
+
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
     _ensure_terminal_env_bridged()
@@ -1468,6 +1474,12 @@ def _get_env_config() -> Dict[str, Any]:
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
     container_backend = env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}
     docker_backend = env_type == "docker"
+    docker_network = True
+    if docker_backend:
+        raw_docker_network = os.getenv("TERMINAL_DOCKER_NETWORK", "true").strip().lower()
+        if raw_docker_network not in {"true", "false"}:
+            raise ValueError("TERMINAL_DOCKER_NETWORK must be 'true' or 'false'")
+        docker_network = raw_docker_network == "true"
 
     # Docker/container-only env vars may be bridged from config.yaml even when
     # the active backend is local/ssh.  Do not parse their JSON/numeric payloads
@@ -1536,6 +1548,8 @@ def _get_env_config() -> Dict[str, Any]:
         "env_type": env_type,
         "modal_mode": coerce_modal_mode(os.getenv("TERMINAL_MODAL_MODE", "auto")),
         "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
+        "docker_network": docker_network,
+        "docker_mount_host_data": os.getenv("TERMINAL_DOCKER_MOUNT_HOST_DATA", "true").lower() in {"true", "1", "yes"},
         "docker_forward_env": docker_forward_env,
         "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
         "modal_image": os.getenv("TERMINAL_MODAL_IMAGE", default_image),
@@ -1657,6 +1671,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             extra_args=docker_extra_args,
             persist_across_processes=cc.get("docker_persist_across_processes", True),
             shm_size=cc.get("docker_shm_size", "1g"),
+            mount_host_data=cc.get("docker_mount_host_data", True),
         )
     
     elif env_type == "singularity":
@@ -2218,6 +2233,7 @@ def _resolve_command_cwd(
     workdir: Optional[str],
     default_cwd: str,
     session_key: Optional[str] = None,
+    env: Any = None,
 ) -> str:
     """Return the cwd for a command. Explicit ``workdir=`` overrides everything.
 
@@ -2229,6 +2245,16 @@ def _resolve_command_cwd(
     which is also what seeds a fresh environment.
     """
     if workdir:
+        workspace_host_cwd = getattr(env, "_workspace_host_cwd", None)
+        if isinstance(workspace_host_cwd, str) and workspace_host_cwd:
+            try:
+                relative = os.path.relpath(os.path.abspath(workdir), workspace_host_cwd)
+            except (OSError, ValueError):
+                relative = None
+            if relative == ".":
+                return "/workspace"
+            if relative and relative != ".." and not relative.startswith(f"..{os.sep}"):
+                return f"/workspace/{relative.replace(os.sep, '/')}"
         return workdir
     return get_session_cwd(session_key) or default_cwd
 
@@ -2442,6 +2468,7 @@ def terminal_tool(
                                 "modal_mode": config.get("modal_mode", "auto"),
                                 "vercel_runtime": config.get("vercel_runtime", ""),
                                 "docker_volumes": config.get("docker_volumes", []),
+                                "docker_network": config.get("docker_network", True),
                                 "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
                                 "docker_forward_env": config.get("docker_forward_env", []),
                                 "docker_env": config.get("docker_env", {}),
@@ -2450,6 +2477,7 @@ def terminal_tool(
                                 "docker_shm_size": config.get("docker_shm_size", "1g"),
                                 "docker_network": config.get("docker_network", True),
                                 "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
+                                "docker_mount_host_data": config.get("docker_mount_host_data", True),
                                 "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
                             }
 
@@ -2525,6 +2553,7 @@ def terminal_tool(
                 workdir=workdir,
                 default_cwd=guard_cwd_base,
                 session_key=session_key,
+                env=env,
             )
 
             def _read_script_in_env(script_path: str) -> Optional[str]:
@@ -2660,6 +2689,7 @@ def terminal_tool(
                 workdir=workdir,
                 default_cwd=cwd,
                 session_key=session_key,
+                env=env,
             )
             try:
                 if env_type == "local":
@@ -2920,6 +2950,7 @@ def terminal_tool(
                         workdir=workdir,
                         default_cwd=cwd,
                         session_key=session_key,
+                        env=env,
                     )
                     execute_kwargs = {
                         "timeout": effective_timeout,
@@ -3185,7 +3216,16 @@ def check_terminal_requirements() -> bool:
             if not docker:
                 logger.error("Docker executable not found in PATH or common install locations")
                 return False
-            result = subprocess.run([docker, "version"], capture_output=True, timeout=5, stdin=subprocess.DEVNULL)
+            attempts = 3 if os.environ.get("HERMES_NO_AUTO_INSTALL") == "1" else 1
+            for attempt in range(attempts):
+                result = subprocess.run(
+                    [docker, "version"], capture_output=True, text=True, timeout=5,
+                    stdin=subprocess.DEVNULL,
+                )
+                if result.returncode == 0:
+                    break
+                if attempt + 1 < attempts and "permission denied" in result.stderr.lower():
+                    time.sleep(0.25)
             return result.returncode == 0
 
         elif env_type == "singularity":
