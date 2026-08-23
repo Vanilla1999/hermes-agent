@@ -221,7 +221,7 @@ def run_attempt(
             surface_ok = sorted(changed_after_gold) == sorted(prod_paths)
             passed = bool(
                 public_base["returncode"] == 0
-                and hidden_base["returncode"] in {1, 2}
+                and hidden_base["returncode"] == 1
                 and patch_applied
                 and surface_ok
                 and public_gold["returncode"] == 0
@@ -321,6 +321,14 @@ def verify_report(report: Mapping[str, Any]) -> None:
         attempts = row.get("attempts") if isinstance(row, Mapping) else None
         if not isinstance(attempts, list) or [item.get("attempt") for item in attempts] != [1, 2]:
             raise ValueError("each task requires exactly two clean gold attempts")
+        if any(
+            not isinstance(item.get("hidden_base"), Mapping)
+            or item["hidden_base"].get("returncode") != 1
+            for item in attempts
+        ):
+            raise ValueError(
+                "hidden-base test must fail with pytest assertion code 1"
+            )
         expected_gold = all(item.get("passed") is True for item in attempts)
         if row.get("gold_reproducible") is not expected_gold:
             raise ValueError("gold reproducibility claim drift")
