@@ -1,1 +1,0 @@
-One-shot exact-head PR validation trigger. Deleted in the next commit.
