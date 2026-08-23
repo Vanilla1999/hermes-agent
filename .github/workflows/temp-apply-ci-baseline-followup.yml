@@ -41,7 +41,7 @@ jobs:
             tests/run_agent/test_reset_aware_primary_restore.py \
             tests/plugins/test_bounded_engineering_cli.py \
             tests/plugins/test_bounded_engineering_no_provider_integration.py::test_doctor_fail_closed_and_green_local_fixture_without_running_docker \
-            tests/hermes_cli/test_plugins.py::TestPluginDiscovery::test_request_hooks_are_invokeable
+            tests/hermes_cli/test_plugins.py::TestPluginHooks::test_request_hooks_are_invokeable
           git diff --check
 
       - name: Commit only permanent changes
