@@ -1,21 +1,22 @@
 name: temp apply CI baseline follow-up
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/ci-baseline-safety
+      - main
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, '[ci-followup-applied]') }}
+    if: ${{ github.head_ref == 'fix/ci-baseline-safety' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: true
 
