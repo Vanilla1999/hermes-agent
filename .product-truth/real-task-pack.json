@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "protocol": "docatlas-source-real-task-pack-v1",
+  "repository": "Vanilla1999/hermes-agent",
+  "frozen_inventory_head": "65b83fa7b21a42c3aafd14cd45230ef80355b418",
+  "working_directory": ".",
+  "pythonpath": [],
+  "tasks": [
+    {
+      "id": "hermes-real-001",
+      "fix_commit": "2f32092b38dce4c3ade0c48897c6fab0edecb893",
+      "issue_text": "Storage optimization crashes at the end of a deferred FTS rebuild on supported SQLite runtimes where the trigram tokenizer/index is unavailable. The base FTS index must still finish cleanly and remain searchable.",
+      "hidden_test_path": "tests/test_hermes_state.py",
+      "public_nodeid": "tests/test_hermes_state.py",
+      "hidden_nodeid": "tests/test_hermes_state.py::TestFtsRebuildFinishWithoutTrigram::test_rebuild_finish_skips_trigram_when_unavailable",
+      "test_timeout_seconds": 300
+    },
+    {
+      "id": "hermes-real-002",
+      "fix_commit": "687dd632a12b952c141c5820c8c7be552d35c108",
+      "issue_text": "Deferred credential refresh correctly performs network work outside the pool lock, but the pool mutations that follow can race concurrent selection/rotation. Preserve the non-blocking refresh window while serializing the state mutation boundary.",
+      "hidden_test_path": "tests/agent/test_credential_pool_deferred_refresh.py",
+      "public_nodeid": "tests/test_hermes_state.py",
+      "hidden_nodeid": "tests/agent/test_credential_pool_deferred_refresh.py::test_deferred_mutations_serialize_against_concurrent_rotation",
+      "test_timeout_seconds": 300
+    },
+    {
+      "id": "hermes-real-003",
+      "fix_commit": "4c2d473a80097b87c903ff659a56ef7a4d62a216",
+      "issue_text": "CredentialPool.next_available_at() calls mutation-capable availability logic and iterates pool entries without the synchronization used by other pool readers. Make it safe against concurrent selection/rotation without changing reset-time semantics.",
+      "hidden_test_path": "tests/run_agent/test_reset_aware_primary_restore.py",
+      "public_nodeid": "tests/run_agent/test_reset_aware_primary_restore.py::TestNextAvailableAt::test_empty_pool_returns_none",
+      "hidden_nodeid": "tests/run_agent/test_reset_aware_primary_restore.py::TestNextAvailableAt::test_runs_under_the_pool_lock"
+    },
+    {
+      "id": "hermes-real-004",
+      "fix_commit": "105aba6705c1dc61fbbc7b5ea69bdfedf76764e5",
+      "issue_text": "Dashboard session pagination and analytics window parameters are effectively unbounded, allowing one request to trigger excessive SQLite/profile fan-out or full-history analytics work. Add request-layer bounds while retaining normal in-range behavior.",
+      "hidden_test_path": "tests/hermes_cli/test_dashboard_param_clamps.py",
+      "public_nodeid": "tests/test_hermes_state.py",
+      "hidden_nodeid": "tests/hermes_cli/test_dashboard_param_clamps.py::TestSessionPaginationClamps::test_oversized_limit_rejected",
+      "test_timeout_seconds": 300
+    },
+    {
+      "id": "hermes-real-005",
+      "fix_commit": "2000278874040f65959a99e9d850a8d59916d4af",
+      "issue_text": "The new profile fan-out request clamp rejects legitimate desktop callers that request 200 rows or over-fetch with an offset. Keep the endpoint bounded, but set the ceiling above real client maxima.",
+      "hidden_test_path": "tests/hermes_cli/test_dashboard_param_clamps.py",
+      "public_nodeid": "tests/hermes_cli/test_dashboard_param_clamps.py::TestSessionPaginationClamps::test_oversized_limit_rejected",
+      "hidden_nodeid": "tests/hermes_cli/test_dashboard_param_clamps.py::TestSessionPaginationClamps::test_profile_fanout_accepts_real_desktop_maximum"
+    },
+    {
+      "id": "hermes-real-006",
+      "fix_commit": "9645ea8d52aefd0b270786ac16f7b0278ca8175d",
+      "issue_text": "Async dashboard provider/custom-endpoint validation performs synchronous HTTP requests on the serving event loop. Preserve validation behavior and error classification while removing the blocking transport from async routes.",
+      "hidden_test_path": "tests/hermes_cli/test_web_server.py",
+      "public_nodeid": "tests/hermes_cli/test_web_server.py",
+      "hidden_nodeid": "tests/hermes_cli/test_web_server.py",
+      "test_timeout_seconds": 300
+    },
+    {
+      "id": "hermes-real-007",
+      "fix_commit": "0de8c32f52f73462be13806eca88caf580bdfe41",
+      "issue_text": "The dashboard plugins hub executes tool availability/auth probes inline and repeatedly rebuilds the same payload, making a read path perform potentially blocking auth/network/import work. Keep the request path read-only and cheap while preserving last-known auth hints.",
+      "hidden_test_path": "tests/hermes_cli/test_plugins_hub_perf_guard.py",
+      "public_nodeid": "tests/test_hermes_state.py",
+      "hidden_nodeid": "tests/hermes_cli/test_plugins_hub_perf_guard.py::test_plugins_hub_does_not_probe_cold_check_fns",
+      "test_timeout_seconds": 300
+    },
+    {
+      "id": "hermes-real-008",
+      "fix_commit": "1f1acc0e4ddd8a39ca10a6aaf832a8029232ecaf",
+      "issue_text": "After making the plugins hub read only, a dashboard-only session can keep an unknown tool-auth verdict forever because nothing warms a cold check_fn cache. Warm cold verdicts away from the request path and surface them on a later hub refresh.",
+      "hidden_test_path": "tests/hermes_cli/test_plugins_hub_perf_guard.py",
+      "public_nodeid": "tests/hermes_cli/test_plugins_hub_perf_guard.py::test_plugins_hub_does_not_probe_cold_check_fns",
+      "hidden_nodeid": "tests/hermes_cli/test_plugins_hub_perf_guard.py::test_plugins_hub_cold_cache_schedules_background_probe",
+      "test_timeout_seconds": 300
+    }
+  ]
+}
