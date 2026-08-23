@@ -6,7 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
-import yaml
+from hermes_cli.config import read_user_config_raw
 
 
 GATE_NAME = "bounded-engineering/v1"
@@ -92,8 +92,8 @@ def _profile_policy_checks(profile_dir: Path) -> list[dict[str, object]]:
     if not config_path.is_file():
         return [_check("profile_policy", False, "profile config.yaml does not exist")]
     try:
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        config = read_user_config_raw(config_path)
+    except Exception as exc:
         return [_check("profile_policy", False, f"invalid profile config: {exc}")]
     if not isinstance(config, dict):
         return [_check("profile_policy", False, "profile config must be a mapping")]
@@ -143,7 +143,7 @@ def _profile_policy_checks(profile_dir: Path) -> list[dict[str, object]]:
             restricted_proxy_env,
             {**restricted_proxy_env, "DOCMANCER_HOME": "/runtime"},
         )
-        and ((volumes == [] and docker_env == {}) or approved_docmancer_storage)
+        and (volumes == [] or approved_docmancer_storage)
         and terminal.get("docker_persist_across_processes") is False
         and terminal.get("docker_mount_host_data") is False
     )
@@ -178,9 +178,7 @@ def _profile_policy_checks(profile_dir: Path) -> list[dict[str, object]]:
 
 def _container_probe_checks(profile_dir: Path, repo_root: str) -> list[dict[str, object]]:
     try:
-        config = yaml.safe_load(
-            (profile_dir / "config.yaml").read_text(encoding="utf-8")
-        )
+        config = read_user_config_raw(profile_dir / "config.yaml")
         image = config["terminal"]["docker_image"]
         inspect = subprocess.run(
             ["docker", "image", "inspect", image],

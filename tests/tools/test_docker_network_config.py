@@ -11,6 +11,7 @@ from tools.environments import docker as docker_env
 
 
 def test_terminal_env_config_reads_docker_network_toggle(monkeypatch):
+    monkeypatch.setenv("TERMINAL_ENV", "docker")
     monkeypatch.setenv("TERMINAL_DOCKER_NETWORK", "false")
 
     config = terminal_tool._get_env_config()

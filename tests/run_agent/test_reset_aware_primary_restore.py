@@ -203,9 +203,8 @@ class TestNextAvailableAt:
         original = pool._available_entries
 
         def _probe(**kwargs):
-            held["locked"] = not pool._lock.acquire(blocking=False)
-            if not held["locked"]:
-                pool._lock.release()
+            is_owned = getattr(pool._lock, "_is_owned", None)
+            held["locked"] = bool(is_owned()) if callable(is_owned) else False
             return original(**kwargs)
 
         pool._available_entries = _probe
