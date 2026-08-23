@@ -23,8 +23,16 @@ class CreationError(RuntimeError):
 
 def _git(repo: Path, *args: str) -> str:
     try:
-        result = subprocess.run(["git", "-C", str(repo), *args], check=False,
-                                capture_output=True, text=True, timeout=10)
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         raise CreationError(f"git_failed: {exc}") from exc
     if result.returncode:
@@ -59,9 +67,24 @@ def _verify_worktree(workspace: Path, branch: str, baseline: str, *, require_cle
 
 
 def _branch_oid(root: Path, branch: str) -> str | None:
-    result = subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
-                             f"refs/heads/{branch}"], check=False, capture_output=True,
-                            text=True, timeout=10)
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{branch}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        timeout=10,
+    )
     return result.stdout.strip() if result.returncode == 0 else None
 
 

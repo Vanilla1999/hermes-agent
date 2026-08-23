@@ -74,7 +74,13 @@ def _repo_root(path: Path) -> str | None:
     try:
         result = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            check=False, capture_output=True, text=True, timeout=10,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -86,7 +92,7 @@ def _profile_policy_checks(profile_dir: Path) -> list[dict[str, object]]:
     if not config_path.is_file():
         return [_check("profile_policy", False, "profile config.yaml does not exist")]
     try:
-        config = yaml.safe_load(config_path.read_text())
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         return [_check("profile_policy", False, f"invalid profile config: {exc}")]
     if not isinstance(config, dict):
@@ -172,9 +178,17 @@ def _profile_policy_checks(profile_dir: Path) -> list[dict[str, object]]:
 
 def _container_probe_checks(profile_dir: Path, repo_root: str) -> list[dict[str, object]]:
     try:
-        config = yaml.safe_load((profile_dir / "config.yaml").read_text())
+        config = yaml.safe_load(
+            (profile_dir / "config.yaml").read_text(encoding="utf-8")
+        )
         image = config["terminal"]["docker_image"]
-        inspect = subprocess.run(["docker", "image", "inspect", image], check=False, capture_output=True, timeout=20)
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", image],
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=20,
+        )
         if inspect.returncode != 0:
             return [_check("docker_image_local", False, "configured image is not available locally")]
         probe = subprocess.run([
@@ -183,7 +197,12 @@ def _container_probe_checks(profile_dir: Path, repo_root: str) -> list[dict[str,
             "sh", "-c",
             "test \"$(pwd)\" = /workspace && test ! -e /var/run/docker.sock && "
             "test ! -e /home/viadmin/.hermes/kanban.db && test -z \"${SSH_AUTH_SOCK:-}\"",
-        ], check=False, capture_output=True, timeout=45)
+        ],
+            check=False,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=45,
+        )
     except (KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
         return [_check("container_probe", False, f"container probe failed: {exc}")]
     return [
@@ -201,10 +220,35 @@ def _repository_policy_checks(repo_root: str) -> list[dict[str, object]]:
         contract = load_contract(Path(repo_root))
     except (ImportError, ValueError) as exc:
         return [_check("repository_contract", False, str(exc))]
-    head = subprocess.run(["git", "-C", repo_root, "rev-parse", "HEAD"], check=False, capture_output=True, text=True, timeout=10)
+    head = subprocess.run(
+        ["git", "-C", repo_root, "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        timeout=10,
+    )
     checks = [_check("repository_contract", True, contract.sha256), _check("baseline_head", head.returncode == 0, head.stdout.strip() or "HEAD is unreadable")]
     if contract.workspace.get("require_clean_source") is True:
-        status = subprocess.run(["git", "-C", repo_root, "status", "--porcelain=v1", "--untracked-files=all"], check=False, capture_output=True, text=True, timeout=10)
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                repo_root,
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
         checks.append(_check("clean_source", status.returncode == 0 and not status.stdout, "clean" if not status.stdout else "source repository is dirty"))
     return checks
 
@@ -270,7 +314,7 @@ def _run_init_repo(args) -> int:
         return 1
     policy_dir.mkdir(parents=True)
     for path, content in files.items():
-        path.write_text(content)
+        path.write_text(content, encoding="utf-8")
     payload["written"] = True
     _emit(payload, json_output=args.json_output)
     return 0
@@ -290,7 +334,7 @@ def _run_validate(args) -> int:
             from contract import load_contract
             from spec import canonicalize_spec
         contract = load_contract(Path(root))
-        raw_spec = json.loads(Path(args.spec).read_text())
+        raw_spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
         spec = canonicalize_spec(raw_spec, verification_ids={item.id for item in contract.verification})
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         _emit({"error": "validation_failed", "detail": str(exc), "schema_version": 1}, json_output=args.json_output)
