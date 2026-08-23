@@ -28,7 +28,9 @@ jobs:
         run: python .github/temp_apply_ci_baseline_followup.py
 
       - name: Install focused test dependencies
-        run: python -m pip install --disable-pip-version-check pytest pyyaml
+        run: >-
+          python -m pip install --disable-pip-version-check
+          pytest pyyaml requests python-dotenv
 
       - name: Run focused regressions
         run: |
