@@ -300,11 +300,22 @@ def test_doctor_fail_closed_and_green_local_fixture_without_running_docker(tmp_p
   docker_image: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   docker_forward_env: []
   docker_mount_cwd_to_workspace: true
-  docker_run_as_host_user: true
-  docker_network: false
-  docker_extra_args: []
+  docker_run_as_host_user: false
+  docker_network: true
+  docker_extra_args:
+    - --network=hermes-restricted
+    - --dns=172.18.0.2
   docker_volumes: []
-  docker_env: {}
+  docker_env:
+    HTTP_PROXY: http://hermes-egress-proxy:3128
+    HTTPS_PROXY: http://hermes-egress-proxy:3128
+    DOCMANCER_WEB_FETCH_USE_ENV_PROXY: "true"
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: safe.directory
+    GIT_CONFIG_VALUE_0: /workspace
+    PYTHONPATH: /workspace
+    http_proxy: http://hermes-egress-proxy:3128
+    https_proxy: http://hermes-egress-proxy:3128
   docker_persist_across_processes: false
   docker_mount_host_data: false
 plugins:
@@ -318,7 +329,7 @@ kanban:
     # container boundary; all repo/profile/board/gate checks above remain real.
     monkeypatch.setattr(engineering_cli, "_container_probe_checks", lambda *_: [
         engineering_cli._check("docker_image_local", True, "isolated fixture"),
-        engineering_cli._check("container_probe", True, "network=none; no secrets/mounts"),
+        engineering_cli._check("container_probe", True, "restricted proxy; no secrets/mounts"),
     ])
     assert engineering_cli.run(args) == 0
     green = json.loads(capsys.readouterr().out)

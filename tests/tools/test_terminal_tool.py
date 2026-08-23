@@ -6,10 +6,12 @@ from tools.environments import docker as docker_environment
 
 def setup_function():
     terminal_tool._reset_cached_sudo_passwords()
+    terminal_tool._terminal_config_bridge_attempted = True
 
 
 def teardown_function():
     terminal_tool._reset_cached_sudo_passwords()
+    terminal_tool._terminal_config_bridge_attempted = False
 
 
 def test_searching_for_sudo_does_not_trigger_rewrite(monkeypatch):

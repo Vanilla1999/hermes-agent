@@ -186,7 +186,7 @@ def generate(args) -> dict[str, Any]:
                           evidence_summary=evidence_summary,
                           max_bytes=args.max_prompt_bytes)
     if getattr(args, "response", None):
-        raw = json.loads(Path(args.response).read_text())
+        raw = json.loads(Path(args.response).read_text(encoding="utf-8"))
         metrics = {"api_requests": 0, "input_tokens": None, "output_tokens": None,
                    "missing_metrics_reasons": {"input_tokens": "offline_replay",
                                                "output_tokens": "offline_replay"}}
@@ -227,7 +227,7 @@ def apply(args) -> dict[str, Any]:
         from create_cli import create, _git
     root = Path(_git(Path(args.repo).expanduser(), "rev-parse", "--show-toplevel")).resolve()
     contract = load_contract(root)
-    raw = json.loads(Path(args.plan).expanduser().read_text())
+    raw = json.loads(Path(args.plan).expanduser().read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or not isinstance(raw.get("board_revision"), str):
         raise PlanError("invalid saved plan")
     plan = validate_plan(raw, expected_revision=raw["board_revision"],

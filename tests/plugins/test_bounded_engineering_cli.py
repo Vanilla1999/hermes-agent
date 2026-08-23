@@ -45,7 +45,7 @@ def test_doctor_fails_closed_without_network_none_config(tmp_path, monkeypatch, 
   docker_forward_env: []
   docker_mount_cwd_to_workspace: true
   docker_run_as_host_user: true
-""")
+""", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     code = run(_args("doctor", "--repo", str(tmp_path / "missing"), "--board", "missing", "--json"))
@@ -57,7 +57,7 @@ def test_doctor_fails_closed_without_network_none_config(tmp_path, monkeypatch, 
     assert checks["network_isolation"] == {
         "name": "network_isolation",
         "ok": False,
-        "detail": "docker_network is false",
+        "detail": "restricted proxy-only Docker network",
     }
 
 
