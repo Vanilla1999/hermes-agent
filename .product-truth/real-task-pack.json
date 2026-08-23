@@ -54,7 +54,7 @@
       "fix_commit": "9645ea8d52aefd0b270786ac16f7b0278ca8175d",
       "issue_text": "Async dashboard provider/custom-endpoint validation performs synchronous HTTP requests on the serving event loop. Preserve validation behavior and error classification while removing the blocking transport from async routes.",
       "hidden_test_path": "tests/hermes_cli/test_web_server.py",
-      "public_nodeid": "tests/hermes_cli/test_web_server.py",
+      "public_nodeid": "tests/test_hermes_state.py",
       "hidden_nodeid": "tests/hermes_cli/test_web_server.py",
       "test_timeout_seconds": 300
     },
@@ -72,7 +72,7 @@
       "fix_commit": "1f1acc0e4ddd8a39ca10a6aaf832a8029232ecaf",
       "issue_text": "After making the plugins hub read only, a dashboard-only session can keep an unknown tool-auth verdict forever because nothing warms a cold check_fn cache. Warm cold verdicts away from the request path and surface them on a later hub refresh.",
       "hidden_test_path": "tests/hermes_cli/test_plugins_hub_perf_guard.py",
-      "public_nodeid": "tests/hermes_cli/test_plugins_hub_perf_guard.py::test_plugins_hub_does_not_probe_cold_check_fns",
+      "public_nodeid": "tests/test_hermes_state.py",
       "hidden_nodeid": "tests/hermes_cli/test_plugins_hub_perf_guard.py::test_plugins_hub_cold_cache_schedules_background_probe",
       "test_timeout_seconds": 300
     }
