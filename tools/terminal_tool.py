@@ -1463,12 +1463,12 @@ def _get_env_config() -> Dict[str, Any]:
     # Kanban workers start in a fresh process after profile selection. Bridge
     # that profile's terminal section here so Docker is never initialized from
     # stale pre-profile environment values.
-    from hermes_cli.config import apply_terminal_config_to_env
-    apply_terminal_config_to_env()
+    # Bridge once and fail open to the historical environment defaults.
+    # The bridge owns exception containment and explicit-config precedence.
+    _ensure_terminal_env_bridged()
 
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
-    _ensure_terminal_env_bridged()
     env_type = os.getenv("TERMINAL_ENV", "local")
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
@@ -1548,7 +1548,6 @@ def _get_env_config() -> Dict[str, Any]:
         "env_type": env_type,
         "modal_mode": coerce_modal_mode(os.getenv("TERMINAL_MODAL_MODE", "auto")),
         "docker_image": os.getenv("TERMINAL_DOCKER_IMAGE", default_image),
-        "docker_network": docker_network,
         "docker_mount_host_data": os.getenv("TERMINAL_DOCKER_MOUNT_HOST_DATA", "true").lower() in {"true", "1", "yes"},
         "docker_forward_env": docker_forward_env,
         "singularity_image": os.getenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
@@ -1582,7 +1581,7 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_volumes": docker_volumes,
         "docker_env": docker_env,
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
-        "docker_network": os.getenv("TERMINAL_DOCKER_NETWORK", "true").lower() in {"true", "1", "yes"},
+        "docker_network": docker_network,
         "docker_extra_args": docker_extra_args,
         "docker_shm_size": docker_shm_size,
         # Cross-process container reuse (issue #20561).  The docs claim

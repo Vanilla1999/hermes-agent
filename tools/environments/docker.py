@@ -909,8 +909,7 @@ class DockerEnvironment(BaseEnvironment):
             cwd = "/root"
         super().__init__(cwd=cwd, timeout=timeout)
         self._persistent = persistent_filesystem
-        persist_across_processes = bool(persist_across_processes and network)
-        self._persist_across_processes = persist_across_processes
+        self._persist_across_processes = bool(persist_across_processes)
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
         self._env = _normalize_env_dict(env)

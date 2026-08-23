@@ -31,7 +31,7 @@ def _reset_bridge_state(monkeypatch):
 def _write_config(text: str) -> None:
     home = get_hermes_home()
     home.mkdir(parents=True, exist_ok=True)
-    (home / "config.yaml").write_text(text)
+    (home / "config.yaml").write_text(text, encoding="utf-8")
 
 
 def test_unset_terminal_env_backfills_backend_from_config():
@@ -122,7 +122,8 @@ def test_bridge_only_attempted_once(monkeypatch):
     terminal_tool._get_env_config()
     terminal_tool._get_env_config()
 
-    assert len(calls) == 1
+    assert calls == [1]
+    assert terminal_tool._terminal_config_bridge_attempted is True
 
 
 def test_bridge_config_failure_does_not_crash(monkeypatch):
@@ -140,3 +141,4 @@ def test_bridge_config_failure_does_not_crash(monkeypatch):
 
     assert config["env_type"] == "ssh"
     assert config["ssh_host"] == "example.test"
+    assert terminal_tool._terminal_config_bridge_attempted is True
