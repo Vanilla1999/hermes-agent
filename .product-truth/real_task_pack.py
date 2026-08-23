@@ -321,19 +321,39 @@ def verify_report(report: Mapping[str, Any]) -> None:
         attempts = row.get("attempts") if isinstance(row, Mapping) else None
         if not isinstance(attempts, list) or [item.get("attempt") for item in attempts] != [1, 2]:
             raise ValueError("each task requires exactly two clean gold attempts")
-        if any(
-            not isinstance(item.get("hidden_base"), Mapping)
-            or item["hidden_base"].get("returncode") != 1
-            for item in attempts
-        ):
-            raise ValueError(
-                "hidden-base test must fail with pytest assertion code 1"
+        attempt_results: list[bool] = []
+        for item in attempts:
+            if not isinstance(item, Mapping):
+                raise ValueError("attempt row must be an object")
+
+            def returncode(field: str) -> object:
+                stage = item.get(field)
+                return stage.get("returncode") if isinstance(stage, Mapping) else None
+
+            if returncode("hidden_base") != 1:
+                raise ValueError(
+                    "hidden-base test must fail with pytest assertion code 1"
+                )
+            actual_passed = bool(
+                returncode("public_base") == 0
+                and item.get("patch_applied") is True
+                and item.get("gold_surface_exact") is True
+                and returncode("public_gold") == 0
+                and returncode("hidden_gold") == 0
             )
-        expected_gold = all(item.get("passed") is True for item in attempts)
+            if item.get("passed") is not actual_passed:
+                raise ValueError("attempt pass claim drift")
+            attempt_results.append(actual_passed)
+
+        expected_gold = all(attempt_results)
         if row.get("gold_reproducible") is not expected_gold:
             raise ValueError("gold reproducibility claim drift")
         gold_count += int(expected_gold)
-        if row.get("real_model_oracle_executed") is not False or row.get("valid") is not False:
+        if (
+            row.get("real_model_oracle_executed") is not False
+            or row.get("real_model_oracle_passed") is not False
+            or row.get("valid") is not False
+        ):
             raise ValueError("gold control cannot self-authorize model-oracle validity")
     if report.get("summary") != {
         "task_count": 8,
