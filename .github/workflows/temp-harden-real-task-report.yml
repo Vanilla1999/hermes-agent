@@ -1,0 +1,139 @@
+name: temp harden P2 real-task report verifier
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: ${{ github.head_ref == 'p2/real-task-pack' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Materialize report verifier hardening
+        run: python .github/temp_harden_real_task_report.py
+
+      - name: Run fail-closed report mutations
+        run: |
+          python -m py_compile .product-truth/real_task_pack.py
+          python - <<'PY'
+          from __future__ import annotations
+
+          import copy
+          import importlib.util
+          from pathlib import Path
+          from typing import Callable
+
+          path = Path('.product-truth/real_task_pack.py')
+          spec = importlib.util.spec_from_file_location('real_task_pack', path)
+          assert spec is not None and spec.loader is not None
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+
+          def attempt(number: int) -> dict[str, object]:
+              return {
+                  'attempt': number,
+                  'public_base': {'returncode': 0},
+                  'hidden_base': {'returncode': 1},
+                  'patch_applied': True,
+                  'gold_surface_exact': True,
+                  'public_gold': {'returncode': 0},
+                  'hidden_gold': {'returncode': 0},
+                  'passed': True,
+              }
+
+          tasks = [
+              {
+                  'id': f'task-{index}',
+                  'attempts': [attempt(1), attempt(2)],
+                  'gold_reproducible': True,
+                  'real_model_oracle_executed': False,
+                  'real_model_oracle_passed': False,
+                  'valid': False,
+              }
+              for index in range(8)
+          ]
+          report = {
+              'schema_version': 1,
+              'protocol': module.REPORT_PROTOCOL,
+              'tasks': tasks,
+              'summary': {
+                  'task_count': 8,
+                  'gold_reproducible_tasks': 8,
+                  'real_model_oracle_tasks': 0,
+                  'valid_tasks': 0,
+              },
+              'claim_boundary': {
+                  'gold_control_complete': True,
+                  'real_model_oracle_complete': False,
+                  'task_pack_ready': False,
+                  'product_truth_proven': False,
+                  'product_failure_proven': False,
+                  'product_maturity': 'Beta',
+              },
+          }
+          module.verify_report(report)
+
+          def rejected(mutator: Callable[[dict[str, object]], None], needle: str) -> None:
+              candidate = copy.deepcopy(report)
+              mutator(candidate)
+              try:
+                  module.verify_report(candidate)
+              except ValueError as exc:
+                  assert needle in str(exc), str(exc)
+              else:
+                  raise AssertionError(f'mutation was accepted: {needle}')
+
+          rejected(
+              lambda value: value['tasks'][0]['attempts'][0]['hidden_base'].__setitem__('returncode', 2),
+              'assertion code 1',
+          )
+          for field, nested in (
+              ('public_base', 'returncode'),
+              ('public_gold', 'returncode'),
+              ('hidden_gold', 'returncode'),
+          ):
+              rejected(
+                  lambda value, field=field, nested=nested: value['tasks'][0]['attempts'][0][field].__setitem__(nested, 1),
+                  'attempt pass claim drift',
+              )
+          rejected(
+              lambda value: value['tasks'][0]['attempts'][0].__setitem__('patch_applied', False),
+              'attempt pass claim drift',
+          )
+          rejected(
+              lambda value: value['tasks'][0]['attempts'][0].__setitem__('gold_surface_exact', False),
+              'attempt pass claim drift',
+          )
+          rejected(
+              lambda value: value['tasks'][0].__setitem__('real_model_oracle_passed', True),
+              'self-authorize',
+          )
+          PY
+          git diff --check
+
+      - name: Commit only permanent verifier change
+        env:
+          BRANCH: p2/real-task-pack
+        run: |
+          rm .github/temp_harden_real_task_report.py
+          rm .github/workflows/temp-harden-real-task-report.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix(p2): recompute every real-task attempt from stage evidence"
+          git push origin "HEAD:${BRANCH}"
