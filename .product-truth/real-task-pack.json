@@ -55,7 +55,7 @@
       "issue_text": "Async dashboard provider/custom-endpoint validation performs synchronous HTTP requests on the serving event loop. Preserve validation behavior and error classification while removing the blocking transport from async routes.",
       "hidden_test_path": "tests/hermes_cli/test_web_server.py",
       "public_nodeid": "tests/test_hermes_state.py",
-      "hidden_nodeid": "tests/hermes_cli/test_web_server.py",
+      "hidden_nodeid": "tests/hermes_cli/test_web_server.py::TestValidateProviderCredential::test_valid_key_passes",
       "test_timeout_seconds": 300
     },
     {

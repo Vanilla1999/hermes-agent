@@ -22,6 +22,7 @@ through the current profile's secret scope rather than the process environment.
 from __future__ import annotations
 
 import logging
+import os
 from contextvars import ContextVar
 from typing import Iterable
 from hermes_cli.config import cfg_get
@@ -31,6 +32,19 @@ logger = logging.getLogger(__name__)
 # Session-scoped set of env var names that should pass through to sandboxes.
 # Backed by ContextVar to prevent cross-session data bleed in the gateway pipeline.
 _allowed_env_vars_var: ContextVar[set[str]] = ContextVar("_allowed_env_vars")
+
+
+def _passthrough_disabled() -> bool:
+    """Return True when an evaluator owns the sandbox and forbids host env transfer.
+
+    Product Truth oracle runs use this hard gate in addition to an empty
+    ``docker_forward_env``.  The latter only disables explicit Docker forwarding;
+    skill-declared variables live in this separate registry and would otherwise
+    still cross the evaluator/model boundary after a skill is loaded.
+    """
+    return os.environ.get("HERMES_DISABLE_ENV_PASSTHROUGH", "").strip().lower() in {
+        "1", "true", "yes"
+    }
 
 
 def _get_allowed() -> set[str]:
@@ -80,11 +94,6 @@ def _is_hermes_provider_credential(name: str) -> bool:
             e,
         )
         return True
-    # Dynamically-generated Hermes-internal secrets (AUXILIARY_*_API_KEY /
-    # _BASE_URL side-LLM credentials, GATEWAY_RELAY_* relay-auth) are provider
-    # credentials the static blocklist can't enumerate — they're injected per
-    # task/relay at gateway startup. A skill must not be able to register them
-    # as passthrough and tunnel them into an execute_code / terminal child.
     if _is_hermes_internal_secret(name):
         return True
     return name in _HERMES_PROVIDER_ENV_BLOCKLIST
@@ -94,18 +103,10 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
     """Register environment variable names as allowed in sandboxed environments.
 
     Typically called when a skill declares ``required_environment_variables``.
-
-    Variables that are Hermes-managed provider credentials (from
-    ``_HERMES_PROVIDER_ENV_BLOCKLIST``) are rejected here to preserve
-    the ``execute_code`` sandbox's credential-scrubbing guarantee per
-    GHSA-rhgp-j443-p4rf. A skill that needs to talk to a Hermes-managed
-    provider should do so via the agent's main-process tools (web_search,
-    web_extract, etc.) where the credential remains safely in the main
-    process.
-
-    Non-Hermes third-party API keys (TENOR_API_KEY, NOTION_TOKEN, etc.)
-    pass through normally — they were never in the sandbox scrub list.
+    The evaluator hard-disable, when present, wins over every registration source.
     """
+    if _passthrough_disabled():
+        return
     for name in var_names:
         name = name.strip()
         if not name:
@@ -126,6 +127,8 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
 def _load_config_passthrough() -> frozenset[str]:
     """Load ``tools.env_passthrough`` from config.yaml (cached)."""
     global _config_passthrough
+    if _passthrough_disabled():
+        return frozenset()
     if _config_passthrough is not None:
         return _config_passthrough
 
@@ -139,11 +142,6 @@ def _load_config_passthrough() -> frozenset[str]:
                 if not isinstance(item, str) or not item.strip():
                     continue
                 name = item.strip()
-                # Mirror the skill-path filter in register_env_passthrough:
-                # Hermes-managed provider credentials must not be passed
-                # through to execute_code / terminal children, regardless of
-                # whether the request came from a skill or from config.yaml.
-                # See GHSA-rhgp-j443-p4rf.
                 if _is_hermes_provider_credential(name):
                     logger.warning(
                         "env passthrough: refusing to register Hermes "
@@ -164,11 +162,9 @@ def _load_config_passthrough() -> frozenset[str]:
 
 
 def is_env_passthrough(var_name: str) -> bool:
-    """Check whether *var_name* is allowed to pass through to sandboxes.
-
-    Returns ``True`` if the variable was registered by a skill or listed in
-    the user's ``tools.env_passthrough`` config.
-    """
+    """Check whether *var_name* is allowed to pass through to sandboxes."""
+    if _passthrough_disabled():
+        return False
     if var_name in _get_allowed():
         return True
     return var_name in _load_config_passthrough()
@@ -176,6 +172,8 @@ def is_env_passthrough(var_name: str) -> bool:
 
 def get_all_passthrough() -> frozenset[str]:
     """Return the union of skill-registered and config-based passthrough vars."""
+    if _passthrough_disabled():
+        return frozenset()
     return frozenset(_get_allowed()) | _load_config_passthrough()
 
 
@@ -191,9 +189,6 @@ def resolve_passthrough_value(
     a missing key returns ``None`` and never falls back to the process-global
     environment.  An unscoped read while multiplexing is active raises the
     fail-closed ``UnscopedSecretError`` from :mod:`agent.secret_scope`.
-
-    Outside multiplexing, an installed scope keeps the existing overlay
-    semantics and an unscoped caller keeps its already-resolved fallback.
     """
     from agent.secret_scope import (
         _is_global_env,
@@ -202,10 +197,6 @@ def resolve_passthrough_value(
         is_multiplex_active,
     )
 
-    # Global terminal/runtime settings are not profile secrets.  ``fallback``
-    # is already the caller's effective value (including an explicit per-call
-    # override), so preserve it instead of replacing it with the process-wide
-    # value while a multiplex scope is active.
     if _is_global_env(name) and fallback is not None:
         return fallback
 
